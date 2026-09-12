@@ -1,0 +1,6 @@
+https://github.com/RKiding/Awesome-finance-skills - No frameworks
+https://github.com/mgechev/skills-best-practices - No frameworks
+https://github.com/samchon/nestia - No frameworks
+https://github.com/4thfever/cultivation-world-simulator - No frameworks
+https://github.com/pchalasani/claude-code-tools - No frameworks
+https://github.com/msoedov/agentic_security - No frameworks

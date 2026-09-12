@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+Draw a 3-set Venn diagram of packages classified as "application" by three models.
+
+Input CSV (one row per package):
+
+    package_name, in_class_1, in_class_2, in_class_3
+
+where the three flags are booleans in any common spelling
+(1/0, true/false, yes/no, y/n, t/f, x, or empty = false).
+A header row is auto-detected; use --no-header / --header to force it.
+
+Usage
+-----
+    python venn_packages.py classifications.csv
+    python venn_packages.py data.csv -o venn.png --title "Application classification"
+    python venn_packages.py data.csv --labels "DeepSeek R1" "Llama 3.1" "GPT-5.4 mini"
+    python venn_packages.py data.csv --palette cvd --members-csv regions.csv
+
+Requires: matplotlib, matplotlib-venn  (pip install matplotlib matplotlib-venn)
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+TRUE_TOKENS = {"1", "true", "t", "yes", "y", "sim", "s", "x", "v"}
+FALSE_TOKENS = {"", "0", "false", "f", "no", "n", "nao", "não", "-", "na", "n/a", "none", "null"}
+
+# Region keys used by matplotlib_venn: '100' = only set A, '110' = A and B not C, etc.
+REGION_KEYS = ["100", "010", "110", "001", "101", "011", "111"]
+
+PALETTES = {
+    # What was asked for: green / red / blue.
+    "rgb": ("#2E9E4F", "#D6263B", "#2F6FD0"),
+    # Colourblind-safer alternative with the same visual roles (green-ish / red-ish / blue).
+    "cvd": ("#009E73", "#D55E00", "#0072B2"),
+}
+
+
+# --------------------------------------------------------------------------- #
+# Parsing
+# --------------------------------------------------------------------------- #
+def parse_bool(raw: str, *, row_no: int, column: int) -> bool:
+    """Convert a CSV cell into a bool, accepting the usual spellings."""
+    token = raw.strip().strip("\"'").lower()
+    if token in TRUE_TOKENS:
+        return True
+    if token in FALSE_TOKENS:
+        return False
+    raise ValueError(
+        f"row {row_no}, column {column}: cannot read {raw!r} as a boolean "
+        f"(accepted: 1/0, true/false, yes/no, y/n, t/f, x, or empty)"
+    )
+
+
+def looks_like_header(row: list[str]) -> bool:
+    """A first row whose three flag cells are not booleans is a header."""
+    for cell in row[1:4]:
+        try:
+            parse_bool(cell, row_no=1, column=0)
+        except ValueError:
+            return True
+    return False
+
+
+def read_csv(path: Path, *, delimiter: str, header: bool | None) -> tuple[list[str], list[tuple[str, tuple[bool, bool, bool]]]]:
+    """Return (header_row_or_empty, [(package, (c1, c2, c3)), ...])."""
+    opener = sys.stdin if str(path) == "-" else open(path, newline="", encoding="utf-8-sig")
+    rows: list[tuple[str, tuple[bool, bool, bool]]] = []
+    header_row: list[str] = []
+
+    try:
+        reader = csv.reader(opener, delimiter=delimiter)
+        for row_no, row in enumerate(reader, start=1):
+            row = [cell for cell in row]
+            if not row or all(cell.strip() == "" for cell in row):
+                continue  # blank line
+            if row[0].lstrip().startswith("#"):
+                continue  # comment
+            if len(row) < 4:
+                raise SystemExit(
+                    f"{path}: row {row_no} has {len(row)} column(s), expected at least 4 "
+                    f"(package, class1, class2, class3): {row!r}"
+                )
+            if not rows and not header_row:
+                is_header = looks_like_header(row) if header is None else header
+                if is_header:
+                    header_row = [cell.strip() for cell in row]
+                    continue
+            name = row[0].strip()
+            if not name:
+                raise SystemExit(f"{path}: row {row_no} has an empty package name")
+            try:
+                flags = tuple(parse_bool(row[i], row_no=row_no, column=i + 1) for i in (1, 2, 3))
+            except ValueError as exc:
+                raise SystemExit(f"{path}: {exc}") from None
+            rows.append((name, flags))  # type: ignore[arg-type]
+    finally:
+        if opener is not sys.stdin:
+            opener.close()
+
+    if not rows:
+        raise SystemExit(f"{path}: no data rows found")
+    return header_row, rows
+
+
+# --------------------------------------------------------------------------- #
+# Set maths
+# --------------------------------------------------------------------------- #
+def build_sets(rows) -> tuple[list[set[str]], list[str], list[str]]:
+    """Return ([set1, set2, set3], duplicate_names, unclassified_names)."""
+    seen: dict[str, tuple[bool, bool, bool]] = {}
+    duplicates: list[str] = []
+    for name, flags in rows:
+        if name in seen:
+            duplicates.append(name)
+            # OR the flags together so a repeated package is not silently dropped
+            seen[name] = tuple(a or b for a, b in zip(seen[name], flags))  # type: ignore[assignment]
+        else:
+            seen[name] = flags
+
+    sets = [set(), set(), set()]
+    unclassified = []
+    for name, flags in seen.items():
+        if not any(flags):
+            unclassified.append(name)
+        for i, flag in enumerate(flags):
+            if flag:
+                sets[i].add(name)
+    return sets, sorted(set(duplicates)), sorted(unclassified)
+
+
+def region_members(sets: list[set[str]]) -> dict[str, set[str]]:
+    """Map each Venn region key ('100', '110', ... '111') to its members."""
+    a, b, c = sets
+    universe = a | b | c
+    out: dict[str, set[str]] = {key: set() for key in REGION_KEYS}
+    for name in universe:
+        key = "".join("1" if name in s else "0" for s in (a, b, c))
+        out[key].add(name)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Plot
+# --------------------------------------------------------------------------- #
+def draw(sets, labels, colors, *, title, out_path, alpha, dpi, show_pct, fontsize, figsize):
+    import matplotlib
+
+    if out_path is not None:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    try:
+        from matplotlib_venn import venn3, venn3_circles
+    except ImportError:
+        raise SystemExit(
+            "matplotlib-venn is not installed.  pip install matplotlib-venn"
+        ) from None
+
+    total = len(sets[0] | sets[1] | sets[2])
+    regions = region_members(sets)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    diagram = venn3(subsets=sets, set_labels=labels, ax=ax, alpha=alpha)
+    
+    # Draw circles with NO lines through the numbers
+    outlines = venn3_circles(subsets=sets, ax=ax, linewidth=0)
+    for circle, color in zip(outlines, colors):
+        circle.set_linewidth(0)  # Remove circle lines
+        circle.set_edgecolor("none")  # Remove edges
+
+    # Color the patches
+    for patch_id, color in zip(("100", "010", "001"), colors):
+        patch = diagram.get_patch_by_id(patch_id)
+        if patch is not None:
+            patch.set_color(color)
+            patch.set_alpha(alpha)
+            patch.set_edgecolor("none")  # Remove patch edges
+            patch.set_linewidth(0)
+    for patch_id in ("110", "101", "011", "111"):
+        patch = diagram.get_patch_by_id(patch_id)
+        if patch is not None:
+            patch.set_edgecolor("none")  # Remove patch edges
+            patch.set_linewidth(0)
+
+    # Region numbers - drawn on top of everything
+    for key in REGION_KEYS:
+        label = diagram.get_label_by_id(key)
+        if label is None:
+            continue
+        count = len(regions[key])
+        if count == 0:
+            label.set_text("")
+            continue
+        text = str(count)
+        if show_pct and total:
+            text = f"{count}\n{count / total:.0%}"
+        label.set_text(text)
+        label.set_fontsize(fontsize + 2)
+        label.set_color("#1A1A1A")
+        label.set_fontweight("bold")
+        # Set high z-order to ensure numbers are on top
+        label.set_zorder(100)
+
+    # Set labels
+    nudge = ((-0.06, 0.0), (0.06, 0.0), (0.0, -0.06))
+    for i, label in enumerate(diagram.set_labels or []):
+        if label is None:
+            continue
+        x, y = label.get_position()
+        label.set_position((x + nudge[i][0], y + nudge[i][1]))
+        label.set_fontsize(fontsize + 2)
+        label.set_fontweight("bold")
+        label.set_color("#1A1A1A")
+        label.set_text(f"{labels[i]}\n(n={len(sets[i])})")
+        label.set_zorder(100)  # Ensure labels are on top
+
+    ax.set_title(title, fontsize=fontsize + 5, color="#1A1A1A", pad=16)
+    agreed = len(regions["111"])
+    ax.text(
+        0.5,
+        -0.10,
+        f"{total} distinct packages classified as applications by ≥1 model  ·  "
+        f"all three agree on {agreed} ({agreed / total:.0%})" if total else "no packages",
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=fontsize - 1,
+        color="#6B6B6B",
+    )
+
+    fig.tight_layout()
+    if out_path is None:
+        plt.show()
+    else:
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+        print(f"wrote {out_path}", file=sys.stderr)
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------- #
+# Reporting
+# --------------------------------------------------------------------------- #
+def jaccard(a: set[str], b: set[str]) -> float:
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
+def report(sets, labels, regions, duplicates, unclassified):
+    total = len(sets[0] | sets[1] | sets[2])
+    w = max(len(lbl) for lbl in labels)
+    print("\nPer-model totals")
+    for lbl, s in zip(labels, sets):
+        print(f"  {lbl:<{w}}  {len(s):>6}")
+
+    print("\nRegions (exclusive counts)")
+    pretty = {
+        "100": f"only {labels[0]}",
+        "010": f"only {labels[1]}",
+        "001": f"only {labels[2]}",
+        "110": f"{labels[0]} & {labels[1]} only",
+        "101": f"{labels[0]} & {labels[2]} only",
+        "011": f"{labels[1]} & {labels[2]} only",
+        "111": "all three",
+    }
+    order = ["100", "010", "001", "110", "101", "011", "111"]
+    pw = max(len(pretty[k]) for k in order)
+    for key in order:
+        n = len(regions[key])
+        pct = f"{n / total:6.1%}" if total else "     -"
+        print(f"  {pretty[key]:<{pw}}  {n:>6}  {pct}")
+    print(f"  {'union (≥1 model)':<{pw}}  {total:>6}  {1.0:6.1%}" if total else "")
+
+    print("\nPairwise agreement (Jaccard)")
+    for i, j in ((0, 1), (0, 2), (1, 2)):
+        print(f"  {labels[i]} vs {labels[j]}: {jaccard(sets[i], sets[j]):.3f}")
+
+    if duplicates:
+        print(
+            f"\nnote: {len(duplicates)} duplicate package name(s) merged with OR: "
+            + ", ".join(duplicates[:10])
+            + (" ..." if len(duplicates) > 10 else ""),
+            file=sys.stderr,
+        )
+    if unclassified:
+        print(
+            f"note: {len(unclassified)} package(s) flagged by no model (not drawn)",
+            file=sys.stderr,
+        )
+
+
+def write_members(path: Path, regions, labels):
+    pretty = {
+        "100": labels[0],
+        "010": labels[1],
+        "001": labels[2],
+        "110": f"{labels[0]}+{labels[1]}",
+        "101": f"{labels[0]}+{labels[2]}",
+        "011": f"{labels[1]}+{labels[2]}",
+        "111": "all three",
+    }
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["package", "region_key", "region", *labels])
+        for key in REGION_KEYS:
+            for name in sorted(regions[key]):
+                writer.writerow([name, key, pretty[key], *(k == "1" for k in key)])
+    print(f"wrote {path}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        description="3-set Venn diagram of packages classified as applications by three models.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("csv", type=Path, help="input CSV (package, class1, class2, class3); '-' for stdin")
+    p.add_argument("-o", "--output", type=Path, default=Path("venn_applications.png"),
+                   help="output image (.png/.pdf/.svg); use --show for an interactive window")
+    p.add_argument("--show", action="store_true", help="open a window instead of writing a file")
+    p.add_argument("--labels", nargs=3, metavar=("CLASS1", "CLASS2", "CLASS3"),
+                   default=["DeepSeek R1", "Llama 3.1", "GPT-5.4 mini"], help="set labels")
+    p.add_argument("--title", default="Packages classified as applications", help="chart title")
+    p.add_argument("--palette", choices=sorted(PALETTES), default="rgb",
+                   help="rgb = green/red/blue as specified; cvd = colourblind-safer equivalents")
+    p.add_argument("--colors", nargs=3, metavar=("C1", "C2", "C3"),
+                   help="override the palette with three matplotlib colours")
+    p.add_argument("--alpha", type=float, default=0.55, help="fill opacity")
+    p.add_argument("--dpi", type=int, default=300, help="output resolution")
+    p.add_argument("--figsize", nargs=2, type=float, default=[12.0, 10.0], metavar=("W", "H"),
+                   help="figure size in inches")
+    p.add_argument("--fontsize", type=int, default=16, help="base font size")
+    p.add_argument("--percent", action="store_true", help="show percentages under each region count")
+    p.add_argument("--delimiter", default=",", help="CSV delimiter")
+    header = p.add_mutually_exclusive_group()
+    header.add_argument("--header", dest="header", action="store_true", default=None,
+                        help="force: first row is a header")
+    header.add_argument("--no-header", dest="header", action="store_false",
+                        help="force: first row is data")
+    p.add_argument("--members-csv", type=Path, help="also dump every package with its region")
+    p.add_argument("--quiet", action="store_true", help="suppress the text report")
+    args = p.parse_args(argv)
+
+    header_row, rows = read_csv(args.csv, delimiter=args.delimiter, header=args.header)
+    labels = args.labels
+    # If the CSV had a header and the user did not pass --labels, use the header names.
+    if header_row and len(header_row) >= 4 and "--labels" not in (argv or sys.argv):
+        labels = [h or l for h, l in zip(header_row[1:4], labels)]
+
+    colors = tuple(args.colors) if args.colors else PALETTES[args.palette]
+
+    sets, duplicates, unclassified = build_sets(rows)
+    regions = region_members(sets)
+
+    if not any(sets):
+        raise SystemExit("no package is flagged for any class - nothing to draw")
+
+    if not args.quiet:
+        report(sets, labels, regions, duplicates, unclassified)
+
+    if args.members_csv:
+        write_members(args.members_csv, regions, labels)
+
+    draw(
+        sets,
+        labels,
+        colors,
+        title=args.title,
+        out_path=None if args.show else args.output,
+        alpha=args.alpha,
+        dpi=args.dpi,
+        show_pct=args.percent,
+        fontsize=args.fontsize,
+        figsize=tuple(args.figsize),
+    )
+
+
+if __name__ == "__main__":
+    main()

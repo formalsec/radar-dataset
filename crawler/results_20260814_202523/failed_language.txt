@@ -1,0 +1,17 @@
+https://github.com/lealone/Lealone - 0.0%
+https://github.com/Agent-Field/agentfield - 45.6%
+https://github.com/datawhalechina/handy-ollama - 4.4%
+https://github.com/hitsz-ids/synthetic-data-generator - 59.2%
+https://github.com/hyp1231/awesome-llm-powered-agent - 0.0%
+https://github.com/lioensky/VCPToolBox - 61.7%
+https://github.com/langfengQ/verl-agent - 65.8%
+https://github.com/Xnhyacinth/Awesome-LLM-Long-Context-Modeling - 0.0%
+https://github.com/study8677/awesome-architecture - 46.2%
+https://github.com/neuron-core/neuron-ai - 0.0%
+https://github.com/zhimaAi/chatwiki - 23.2%
+https://github.com/hyperspaceai/agi - 0.0%
+https://github.com/eugene1g/agent-safehouse - 0.2%
+https://github.com/aws/amazon-q-developer-cli - 0.3%
+https://github.com/cogwheel0/conduit - 0.0%
+https://github.com/FareedKhan-dev/all-rl-algorithms - 0.4%
+https://github.com/melih-unsal/DemoGPT - 68.5%
