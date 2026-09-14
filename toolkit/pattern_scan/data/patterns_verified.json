@@ -1,0 +1,598 @@
+{
+  "categories": {
+    "agent_creation": {
+      "frameworks": {
+        "Agno": [
+          ".arun(",
+          ".run(",
+          "@agent",
+          "@crew",
+          "@tool",
+          "Agent(",
+          "Team(",
+          "Workflow(",
+          "agno\\.Agent",
+          "from agno.agent import Agent"
+        ],
+        "AutoGen": [
+          "AssistantAgent(",
+          "ConversableAgent(",
+          "GroupChat(",
+          "UserProxyAgent("
+        ],
+        "Bee Agent Framework": [
+          "@i-am-bee/beeai-framework",
+          "ReActAgent(",
+          "RequirementAgent(",
+          "bee_agent_framework",
+          "beeai_framework",
+          "from 'beeai-framework'",
+          "from beeai_framework.agents.react import ReActAgent",
+          "from beeai_framework.agents.requirement import RequirementAgent",
+          "new ReActAgent(",
+          "new RequirementAgent("
+        ],
+        "CopilotKit": [
+          "<CopilotKit",
+          "@copilotkit/react-core",
+          "useCopilotAction("
+        ],
+        "CrewAI": [
+          "@agent",
+          "@crew",
+          "Agent(",
+          "Crew(",
+          "Process.hierarchical",
+          "Process.sequential"
+        ],
+        "Deep Agents JS": [
+          "@langchain/deep-agents",
+          "DeepAgent",
+          "DeepAgentConfig",
+          "deepAgents("
+        ],
+        "ElizaOS": [
+          "@elizaos/core",
+          "ElizaAgent(",
+          "createEliza(",
+          "new AgentRuntime("
+        ],
+        "Haystack": [
+          "Agent(",
+          "Pipeline(",
+          "from haystack import Agent"
+        ],
+        "LangChain": [
+          "AgentExecutor(",
+          "createOpenAIToolsAgent(",
+          "createReactAgent(",
+          "createToolCallingAgent(",
+          "create_json_agent(",
+          "create_openai_tools_agent(",
+          "create_react_agent(",
+          "create_structured_chat_agent(",
+          "create_tool_calling_agent(",
+          "from langchain.agents import AgentExecutor",
+          "new AgentExecutor("
+        ],
+        "LangGraph": [
+          ".addNode(",
+          ".add_node(",
+          ".compile(",
+          "MemorySaver(",
+          "MessageGraph(",
+          "SqliteSaver(",
+          "StateGraph(",
+          "create_react_agent(",
+          "new StateGraph("
+        ],
+        "LlamaIndex": [
+          "@step",
+          "AgentRunner(",
+          "FunctionCallingAgentWorker(",
+          "OpenAIAgent(",
+          "ReActAgent(",
+          "StartEvent",
+          "StopEvent",
+          "Workflow("
+        ],
+        "MCP SDK": [
+          "@modelcontextprotocol/sdk",
+          "MCP",
+          "Server(",
+          "new McpServer("
+        ],
+        "Mastra": [
+          "@mastra/core",
+          "MastraAgent",
+          "createAgent(",
+          "new Agent<",
+          "new Mastra("
+        ],
+        "OpenAI Agents SDK": [
+          "from agents import Agent",
+          "from openai import Agent",
+          "openai.agents"
+        ],
+        "Pydantic AI": [
+          "@agent.tool",
+          "@agent.tool_plain",
+          "from pydantic_ai import Agent",
+          "pydantic_ai.Agent"
+        ],
+        "Smolagents": [
+          "CodeAgent(",
+          "ManagedAgent(",
+          "ToolCallingAgent("
+        ],
+        "Vercel AI SDK": [
+          "from '@ai-sdk/",
+          "from 'ai'",
+          "generateText(",
+          "streamText("
+        ]
+      },
+      "generic": {
+        "Graph Compile": [
+          "\\.compile\\s*\\("
+        ]
+      }
+    },
+    "agent_calls": {
+      "frameworks": {
+        "Agno": [
+          ".arun(",
+          ".run("
+        ],
+        "AutoGen": [
+          ".initiate_chat(",
+          ".initiate_chats("
+        ],
+        "Bee Agent Framework": [
+          ".run(",
+          "await agent.run("
+        ],
+        "CrewAI": [
+          ".kickoff("
+        ],
+        "Deep Agents JS": [
+          ".invoke(",
+          ".stream("
+        ],
+        "ElizaOS": [
+          ".run(",
+          "runtime.processActions("
+        ],
+        "Haystack": [
+          ".run(",
+          "Agent.run(",
+          "Pipeline.run("
+        ],
+        "LangChain": [
+          ".ainvoke(",
+          ".invoke(",
+          ".stream("
+        ],
+        "LangGraph": [
+          ".ainvoke(",
+          ".invoke(",
+          ".stream("
+        ],
+        "LlamaIndex": [
+          ".achat(",
+          ".chat(",
+          ".query("
+        ],
+        "Mastra": [
+          ".run("
+        ],
+        "OpenAI Agents SDK": [
+          "Runner.run(",
+          "Runner.run_sync(",
+          "agent.run("
+        ],
+        "Pydantic AI": [
+          ".run(",
+          ".run_sync("
+        ],
+        "Smolagents": [
+          ".run(",
+          "CodeAgent(...).run(task)",
+          "ToolCallingAgent(...).run(task)"
+        ],
+        "Vercel AI SDK": [
+          "generateText(",
+          "streamText("
+        ]
+      },
+      "generic": {
+        "Async Invoke": [
+          "\\.ainvoke\\s*\\("
+        ],
+        "Async Run": [
+          "\\.arun\\s*\\("
+        ],
+        "Chat": [
+          "\\.chat\\s*\\("
+        ],
+        "Chat Initiation": [
+          "\\.initiate_chat\\s*\\("
+        ],
+        "Direct Invoke": [
+          "\\.invoke\\s*\\("
+        ],
+        "Kickoff": [
+          "\\.kickoff\\s*\\("
+        ],
+        "Run": [
+          "\\.run\\s*\\("
+        ],
+        "Stream": [
+          "\\.stream\\s*\\("
+        ],
+        "Sync Run": [
+          "\\.run_sync\\s*\\("
+        ],
+        "agent_calls_api_patterns": [
+          "POST /api/agents/",
+          "POST /api/agents/[^/]+/invoke",
+          "X-Agent-ID"
+        ]
+      }
+    },
+    "rag_creation": {
+      "frameworks": {
+        "Chroma": [
+          "Chroma(",
+          "Chroma.from_documents(",
+          "Chroma.from_texts(",
+          "chromadb.Client(",
+          "chromadb.PersistentClient(",
+          "new ChromaClient("
+        ],
+        "LlamaIndex": [
+          "SimpleDirectoryReader(",
+          "VectorStoreIndex(",
+          "VectorStoreIndex.from_documents(",
+          "VectorStoreIndex.from_vector_store("
+        ],
+        "Mem0": [
+          "Memory(",
+          "MemoryClient("
+        ],
+        "Milvus": [
+          "Milvus.from_documents(",
+          "MilvusClient(",
+          "connections.connect("
+        ],
+        "PGVector": [
+          "PGVector("
+        ],
+        "Pinecone": [
+          "Pinecone(",
+          "Pinecone.from_documents(",
+          "Pinecone.from_existing_index(",
+          "Pinecone.from_texts(",
+          "new Pinecone(",
+          "pinecone.Index("
+        ],
+        "Qdrant": [
+          "Qdrant.from_documents(",
+          "Qdrant.from_texts(",
+          "QdrantClient(",
+          "new QdrantClient("
+        ],
+        "Weaviate": [
+          "Weaviate.from_documents(",
+          "Weaviate.from_texts(",
+          "weaviate.Client(",
+          "weaviate.client(",
+          "weaviate.connect_to_local(",
+          "weaviate.connect_to_weaviate_cloud("
+        ],
+        "Zep": [
+          "AsyncZep(",
+          "Zep(",
+          "ZepClient("
+        ]
+      },
+      "generic": {
+        "Classmethod Factory": [
+          "\\.from_documents\\s*\\(",
+          "\\.from_existing_index\\s*\\(",
+          "\\.from_texts\\s*\\(",
+          "\\.from_vector_store\\s*\\("
+        ],
+        "Generic Client": [
+          "\\bClient\\s*\\(",
+          "\\bPersistentClient\\s*\\("
+        ],
+        "Zep JS": [
+          "new ZepClient("
+        ]
+      }
+    },
+    "rag_writes": {
+      "frameworks": {
+        "Agno": [
+          "Knowledge()",
+          "knowledge.add_documents(",
+          "knowledge.add_texts("
+        ],
+        "AutoGen": [
+          "memory.add(",
+          "memory.store("
+        ],
+        "Chroma": [
+          ".add(",
+          ".add({",
+          ".update(",
+          ".upsert(",
+          ".upsert({"
+        ],
+        "CrewAI": [
+          "collection.add(",
+          "vector_store.add_documents("
+        ],
+        "Haystack": [
+          ".add_documents(",
+          ".run("
+        ],
+        "LangChain": [
+          ".addDocuments(",
+          ".add_documents("
+        ],
+        "LangGraph": [
+          "store_node(",
+          "vector_store.add_documents("
+        ],
+        "LlamaIndex": [
+          ".insert(",
+          ".persist()"
+        ],
+        "Mem0": [
+          ".add(",
+          ".store_conversation("
+        ],
+        "Milvus": [
+          ".insert("
+        ],
+        "PGVector": [
+          ".add_documents("
+        ],
+        "Pinecone": [
+          ".update(",
+          ".upsertRecords(",
+          ".upsert_records("
+        ],
+        "Qdrant": [
+          ".uploadRecords(",
+          ".upload_collection(",
+          ".upload_records(",
+          ".upsert("
+        ],
+        "Weaviate": [
+          ".add_object(",
+          ".insertMany("
+        ],
+        "Zep": [
+          ".aadd_memory(",
+          ".add_memory(",
+          ".memory.add(",
+          ".thread.add_messages(",
+          "zep-python"
+        ]
+      },
+      "generic": {
+        "Batch Storage": [
+          "\\.batch\\.create\\s*\\(",
+          "batch\\.add"
+        ],
+        "Index Build": [
+          "\\.build_index\\s*\\("
+        ],
+        "Memory Storage": [
+          "\\.remember\\s*\\(",
+          "\\.store\\s*\\("
+        ],
+        "Persistence (save)": [
+          "\\.save\\s*\\("
+        ],
+        "Zep JS": [
+          ".addMemory(",
+          ".memory.add("
+        ],
+        "rag_writes_api_patterns": [
+          "POST /api/memories",
+          "POST /api/memories/",
+          "X-Agent-ID"
+        ]
+      }
+    },
+    "rag_reads": {
+      "frameworks": {
+        "Agno": [
+          "knowledge.retrieve(",
+          "knowledge.search("
+        ],
+        "AutoGen": [
+          "memory.get(",
+          "memory.query("
+        ],
+        "Chroma": [
+          ".get(",
+          ".query(",
+          ".query({"
+        ],
+        "CrewAI": [
+          "collection.query(",
+          "vector_store.similarity_search("
+        ],
+        "Haystack": [
+          ".run(",
+          "Retriever("
+        ],
+        "LangChain": [
+          ".asRetriever(",
+          ".as_retriever(",
+          ".get_relevant_documents(",
+          ".similaritySearch(",
+          ".similarity_search("
+        ],
+        "LangGraph": [
+          "retriever_node(",
+          "vector_store.similarity_search("
+        ],
+        "LlamaIndex": [
+          ".as_retriever(",
+          ".retrieve(",
+          "query_engine.query("
+        ],
+        "Mem0": [
+          ".get_all(",
+          ".search("
+        ],
+        "Milvus": [
+          ".query(",
+          ".search("
+        ],
+        "PGVector": [
+          ".similarity_search(",
+          ".similarity_search_with_score("
+        ],
+        "Pinecone": [
+          ".fetch(",
+          ".fetch({",
+          ".query(",
+          ".query({"
+        ],
+        "Qdrant": [
+          ".query(",
+          ".query_points(",
+          ".scroll(",
+          ".search("
+        ],
+        "Weaviate": [
+          ".query.fetchObjects(",
+          ".query.fetch_objects(",
+          ".query.nearText(",
+          ".query.near_text(",
+          ".query.near_vector("
+        ],
+        "Zep": [
+          ".asearch_memory(",
+          ".memory.get(",
+          ".search_memory(",
+          ".thread.get_user_context("
+        ]
+      },
+      "generic": {
+        "Retriever Fetch": [
+          "\\.get_relevant_documents\\s*\\(",
+          "\\.retrieve\\s*\\("
+        ],
+        "Retriever Wiring / Generic Fetch": [
+          "\\.as_retriever\\s*\\(",
+          "\\.get\\s*\\("
+        ],
+        "Search (memory)": [
+          "\\.search_memory\\s*\\("
+        ],
+        "Zep JS": [
+          ".memory.get(",
+          ".searchMemory("
+        ],
+        "rag_reads_api_patterns": [
+          "GET /api/memories",
+          "GET /api/memories/{id}",
+          "POST /api/search",
+          "X-Agent-ID"
+        ]
+      }
+    },
+    "a2a_interaction": {
+      "frameworks": {
+        "A2A SDK": [
+          ".get_task(",
+          ".send_task(",
+          "/.well-known/agent.json",
+          "A2AClient("
+        ],
+        "Agno": [
+          "Team(",
+          "mode=\"coordinate\"",
+          "mode=\"route\""
+        ],
+        "AutoGen": [
+          ".initiate_chat(",
+          "GroupChat(",
+          "speaker_selection_method="
+        ],
+        "Bee Agent Framework": [
+          "HandoffTool(",
+          "from beeai_framework.tools.handoff import HandoffTool"
+        ],
+        "CrewAI": [
+          "Process.hierarchical",
+          "manager_agent=",
+          "manager_llm="
+        ],
+        "Deep Agents JS": [
+          "@langchain/langgraph"
+        ],
+        "ElizaOS": [
+          "runtime.processActions("
+        ],
+        "LangGraph": [
+          ".addEdge(",
+          ".add_edge(",
+          "Command(goto=",
+          "Command({ goto:"
+        ],
+        "LlamaIndex": [
+          ".add_workflows(",
+          "@step",
+          "AgentWorkflow("
+        ],
+        "MCP SDK": [
+          "sampling/createMessage"
+        ],
+        "Mastra": [
+          ".getAgent(",
+          ".step(",
+          "Workflow("
+        ],
+        "OpenAI Agents SDK": [
+          "Handoff(",
+          "handoffs=["
+        ],
+        "Smolagents": [
+          "ManagedAgent(",
+          "managed_agents=["
+        ]
+      },
+      "generic": {
+        "A2A Invocation": [
+          "invoke_agent\\s*\\("
+        ],
+        "A2A Protocol": [
+          "A2A",
+          "agent-to-agent"
+        ],
+        "Child Agent Invoke": [
+          "agent\\.invoke_child\\s*\\("
+        ],
+        "Delegate Call": [
+          "\\.delegate\\s*\\(",
+          "delegate_to_agent\\s*\\("
+        ],
+        "Sub-agent Dispatch": [
+          "sub_agent\\.run\\s*\\("
+        ],
+        "Tool Agent Invoke": [
+          "tool\\.invoke_agent"
+        ]
+      }
+    }
+  }
+}

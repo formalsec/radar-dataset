@@ -1,0 +1,256 @@
+{
+  "metadata": {
+    "total_app_repos": 5,
+    "total_repos_in_sheet": 5,
+    "last_updated": "2026-08-14T20:27:54.643617",
+    "filter_date": "2026-08-30"
+  },
+  "repos": [
+    {
+      "name": "NousResearch/hermes-agent",
+      "url": "https://github.com/NousResearch/hermes-agent",
+      "stars": 230503,
+      "language_percentage": 97.72,
+      "languages": [
+        {
+          "name": "Python",
+          "percentage": 77.3239563216695
+        },
+        {
+          "name": "TypeScript",
+          "percentage": 19.73927754553143
+        },
+        {
+          "name": "JavaScript",
+          "percentage": 0.6561827106090893
+        },
+        {
+          "name": "TeX",
+          "percentage": 0.5111053253395591
+        },
+        {
+          "name": "Shell",
+          "percentage": 0.4874381845616378
+        }
+      ],
+      "frameworks": [
+        {
+          "name": "Agno",
+          "category": "agent_orchestration",
+          "category_display": "Agent Orchestration & Multi-Agent Systems"
+        },
+        {
+          "name": "OpenAI SDK",
+          "category": "llm_sdks",
+          "category_display": "LLM SDKs & Function Calling"
+        },
+        {
+          "name": "Anthropic SDK",
+          "category": "llm_sdks",
+          "category_display": "LLM SDKs & Function Calling"
+        },
+        {
+          "name": "MCP SDK",
+          "category": "protocols",
+          "category_display": "Integration Protocols (MCP/A2A)"
+        }
+      ],
+      "found_via": "agent",
+      "found_at": "2026-08-14T16:39:11.660193"
+    },
+    {
+      "name": "anthropics/claude-code",
+      "url": "https://github.com/anthropics/claude-code",
+      "stars": 141442,
+      "language_percentage": 84.6,
+      "languages": [
+        {
+          "name": "Python",
+          "percentage": 79.6066424695719
+        },
+        {
+          "name": "Shell",
+          "percentage": 13.712238821438827
+        },
+        {
+          "name": "TypeScript",
+          "percentage": 4.991352525472805
+        },
+        {
+          "name": "PowerShell",
+          "percentage": 1.1484623473197146
+        },
+        {
+          "name": "Dockerfile",
+          "percentage": 0.5413038361967523
+        }
+      ],
+      "frameworks": [
+        {
+          "name": "Anthropic SDK",
+          "category": "llm_sdks",
+          "category_display": "LLM SDKs & Function Calling"
+        }
+      ],
+      "found_via": "agent",
+      "found_at": "2026-08-14T16:39:22.042535"
+    },
+    {
+      "name": "Shubhamsaboo/awesome-llm-apps",
+      "url": "https://github.com/Shubhamsaboo/awesome-llm-apps",
+      "stars": 132618,
+      "language_percentage": 92.87,
+      "languages": [
+        {
+          "name": "Python",
+          "percentage": 55.74715053555123
+        },
+        {
+          "name": "TypeScript",
+          "percentage": 21.417413611081475
+        },
+        {
+          "name": "JavaScript",
+          "percentage": 15.70558668598009
+        },
+        {
+          "name": "HTML",
+          "percentage": 4.334816518038573
+        },
+        {
+          "name": "CSS",
+          "percentage": 2.4848607411111097
+        }
+      ],
+      "frameworks": [
+        {
+          "name": "LangGraph",
+          "category": "agent_orchestration",
+          "category_display": "Agent Orchestration & Multi-Agent Systems"
+        },
+        {
+          "name": "CrewAI",
+          "category": "agent_orchestration",
+          "category_display": "Agent Orchestration & Multi-Agent Systems"
+        },
+        {
+          "name": "Agno",
+          "category": "agent_orchestration",
+          "category_display": "Agent Orchestration & Multi-Agent Systems"
+        },
+        {
+          "name": "OpenAI SDK",
+          "category": "llm_sdks",
+          "category_display": "LLM SDKs & Function Calling"
+        },
+        {
+          "name": "Together SDK",
+          "category": "llm_sdks",
+          "category_display": "LLM SDKs & Function Calling"
+        },
+        {
+          "name": "Qdrant",
+          "category": "memory_rag",
+          "category_display": "Memory & RAG (Retrieval-Augmented Generation)"
+        },
+        {
+          "name": "Browser-use",
+          "category": "tool_use",
+          "category_display": "Tool Use & Browser Automation"
+        },
+        {
+          "name": "MCP SDK",
+          "category": "protocols",
+          "category_display": "Integration Protocols (MCP/A2A)"
+        }
+      ],
+      "found_via": "agent",
+      "found_at": "2026-08-14T16:39:23.581507"
+    },
+    {
+      "name": "browser-use/browser-use",
+      "url": "https://github.com/browser-use/browser-use",
+      "stars": 109211,
+      "language_percentage": 99.14,
+      "languages": [
+        {
+          "name": "Python",
+          "percentage": 99.14011885099988
+        },
+        {
+          "name": "Shell",
+          "percentage": 0.3199465985166317
+        },
+        {
+          "name": "Dockerfile",
+          "percentage": 0.3157464185008627
+        },
+        {
+          "name": "HTML",
+          "percentage": 0.22418813198262308
+        }
+      ],
+      "frameworks": [
+        {
+          "name": "OpenAI SDK",
+          "category": "llm_sdks",
+          "category_display": "LLM SDKs & Function Calling"
+        },
+        {
+          "name": "Anthropic SDK",
+          "category": "llm_sdks",
+          "category_display": "LLM SDKs & Function Calling"
+        },
+        {
+          "name": "Browser-use",
+          "category": "tool_use",
+          "category_display": "Tool Use & Browser Automation"
+        },
+        {
+          "name": "MCP SDK",
+          "category": "protocols",
+          "category_display": "Integration Protocols (MCP/A2A)"
+        }
+      ],
+      "found_via": "agent",
+      "found_at": "2026-08-14T16:39:25.190676"
+    },
+    {
+      "name": "google-gemini/gemini-cli",
+      "url": "https://github.com/google-gemini/gemini-cli",
+      "stars": 106518,
+      "language_percentage": 99.67,
+      "languages": [
+        {
+          "name": "TypeScript",
+          "percentage": 96.93024468027134
+        },
+        {
+          "name": "JavaScript",
+          "percentage": 1.690035326647096
+        },
+        {
+          "name": "Python",
+          "percentage": 1.0515399432783412
+        },
+        {
+          "name": "Shell",
+          "percentage": 0.14765164277201637
+        },
+        {
+          "name": "C#",
+          "percentage": 0.11750908044097892
+        }
+      ],
+      "frameworks": [
+        {
+          "name": "MCP SDK",
+          "category": "protocols",
+          "category_display": "Integration Protocols (MCP/A2A)"
+        }
+      ],
+      "found_via": "agent",
+      "found_at": "2026-08-14T16:39:26.151227"
+    }
+]
+}
