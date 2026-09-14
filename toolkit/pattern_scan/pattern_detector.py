@@ -34,6 +34,71 @@ per-file named_agents/named_stores/store_agent_links this file now emits.
 """
 
 import ast
+
+# Maps a Python import's module root to the framework it belongs to. This
+# is the grounded, "checked against what's actually true" resolution --
+# preferred over pattern-specificity guessing whenever it applies. Fixes
+# the one tie pattern-length ranking genuinely cannot break: two
+# frameworks listing the EXACT SAME bare pattern (Agno and CrewAI both
+# list plain "Agent(") can only be told apart by knowing which module the
+# name was actually imported from.
+MODULE_TO_FRAMEWORK = {
+    "crewai": "CrewAI",
+    "autogen": "AutoGen", "pyautogen": "AutoGen",
+    "agno": "Agno",
+    "langchain": "LangChain",
+    "langgraph": "LangGraph",
+    "llama_index": "LlamaIndex",
+    "haystack": "Haystack",
+    "pydantic_ai": "Pydantic AI",
+    "smolagents": "Smolagents",
+    "agents": "OpenAI Agents SDK",
+    "beeai_framework": "Bee Agent Framework", "bee_agent_framework": "Bee Agent Framework",
+    "chromadb": "Chroma",
+    "qdrant_client": "Qdrant",
+    "pinecone": "Pinecone",
+    "weaviate": "Weaviate",
+    "pgvector": "PGVector",
+    "pymilvus": "Milvus",
+    "mem0": "Mem0",
+    "zep_python": "Zep", "zep_cloud": "Zep",
+    "openai": "OpenAI SDK",
+    "anthropic": "Anthropic SDK",
+    "google": "Google GenAI",  # covers google.genai / google.generativeai
+    "together": "Together SDK",
+    "instructor": "Instructor",
+    "playwright": "Playwright",
+    "browser_use": "Browser-use",
+    "e2b": "E2B",
+    "composio": "Composio",
+    "mcp": "MCP SDK",
+    "fastmcp": "FastMCP",
+    "a2a": "A2A SDK", "a2a_sdk": "A2A SDK",
+    # TODO: extend as real repos surface more import styles not covered here.
+}
+
+
+def _build_import_aliases(tree):
+    """
+    local_name -> canonical "module.Symbol" (or just "module" for a bare
+    `import module`). Examples:
+        from crewai import Agent          -> {"Agent": "crewai.Agent"}
+        import autogen                     -> {"autogen": "autogen"}
+        import autogen as ag               -> {"ag": "autogen"}
+    """
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                aliases[local] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                local = alias.asname or alias.name
+                aliases[local] = f"{module}.{alias.name}" if module else alias.name
+    return aliases
+
 import json
 import re
 from dataclasses import dataclass, field
@@ -53,7 +118,7 @@ EXTENSION_LANGUAGE_MAP = {
     ".tsx": "javascript",
 }
 
-DEFAULT_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024  # 2 MB
+DEFAULT_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024  # Mudar
 
 _JS_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _JS_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
@@ -89,6 +154,10 @@ class FileResult:
     read_sites: list = field(default_factory=list)
     call_sites: list = field(default_factory=list)
     findings: list = field(default_factory=list)  # everything above, merged into one flat list
+    imports: list = field(default_factory=list)  # every import in the file + resolved framework, if any
+    llm_tool_calls: list = field(default_factory=list)  # Option A: confirmed OpenAI/Anthropic tools= calls
+    tool_use_markers: list = field(default_factory=list)  # custom tool-registration markers (line-located)
+    agent_markers: list = field(default_factory=list)  # custom agent-abstraction markers (line-located)
 
 
 class CompiledCategory:
@@ -129,13 +198,16 @@ class CompiledCategory:
         # framework-specific "Agent(" despite being LESS specific).
         # (2) within the same tier, longer pattern text first, as a
         # reasonable specificity proxy (e.g. "AssistantAgent(" over "Agent(").
-        # NOTE (known remaining limitation): two frameworks that share the
-        # exact same literal pattern (e.g. Agno and CrewAI both listing
-        # bare "Agent(") cannot be disambiguated by length at all -- that
-        # tie is broken by insertion order today, which is not reliable.
-        # Resolving that fully needs import-statement-based disambiguation
-        # (checking which module "Agent" was imported from), not implemented
-        # here yet -- flagged as a next step, not silently papered over.
+        #
+        # Two frameworks sharing the EXACT same literal pattern (Agno and
+        # CrewAI both list a bare "Agent(") cannot be told apart by length
+        # at all -- ranking alone would break that tie by insertion order,
+        # which is meaningless. That case is handled downstream instead, by
+        # _frameworks_for_call_identifier + _match_constructor_text: the
+        # call's own name is resolved through THIS FILE's import statements,
+        # so `from crewai import Agent` settles it as CrewAI and
+        # `from agno.agent import Agent` as Agno. Ranking narrows the
+        # candidates; imports confirm the answer.
         merged = []
         for label, compiled in self.frameworks.items():
             for pattern_str, regex in compiled:
@@ -188,7 +260,18 @@ class PatternDetector:
             return FileResult(language=language, skipped_reason=f"read failed: {e}")
         return self.analyze_source(source, filepath.name)
 
-    def analyze_source(self, source, filename, size_bytes=None):
+    def analyze_source(self, source, filename, size_bytes=None, external_exports=None):
+        """
+        external_exports: optional {"stores": {module: {var: framework}},
+        "agents": {module: {var: framework}}} collected from a FIRST pass
+        over the repo, letting this file resolve a store OR agent it
+        imported from another file (`from store import kb`,
+        `from agents import researcher`) -- without it, a write/read/call
+        performed in a different file from where the object was created is
+        invisible, which systematically under-counts rag_writers,
+        rag_readers and agent calls in modular codebases.
+        See scan_api._collect_exports for how it's built.
+        """
         language = EXTENSION_LANGUAGE_MAP.get(Path(filename).suffix.lower())
         if language is None:
             return FileResult(language=None, skipped_reason="unsupported extension")
@@ -200,18 +283,23 @@ class PatternDetector:
                 source, self._agent_creation_category,
                 self._rag_creation_category, self._rag_writes_category,
                 self._rag_reads_category, self._agent_calls_category,
+                external_exports=external_exports,
             )
             (reduced_text, parse_error, named_agents, named_stores,
-             store_links, tainted_writes, write_sites, read_sites, call_sites) = reduced
+             store_links, tainted_writes, write_sites, read_sites, call_sites, imports,
+             llm_tool_calls, tool_use_markers, agent_markers) = reduced
         else:
             reduced_text, parse_error = _reduce_javascript(source), None
-            named_agents, named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites = [], [], [], [], [], [], []
+            named_agents, named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], [], []
+            llm_tool_calls, tool_use_markers, agent_markers = [], [], []
 
         result = FileResult(
             language=language, parse_error=parse_error,
             named_agents=named_agents, named_stores=named_stores,
             store_agent_links=store_links, tainted_writes=tainted_writes,
             write_sites=write_sites, read_sites=read_sites, call_sites=call_sites,
+            imports=imports, llm_tool_calls=llm_tool_calls,
+            tool_use_markers=tool_use_markers, agent_markers=agent_markers,
         )
 
         # ONE flat list, same shape for everything: what was found, what
@@ -245,6 +333,32 @@ class PatternDetector:
             findings.append({
                 "type": "read", "name": r["variable"], "framework": r.get("framework"),
                 "matched": f".{r['method']}(", "line": r["line"],
+            })
+        # tool_use, from two sources, both located by line so they can be
+        # spot-checked the same way as everything else:
+        #   1. confirmed: tools= handed to a real OpenAI/Anthropic client
+        #   2. marker: a custom tool-registration convention (no framework
+        #      import to confirm it against -- framework stays null)
+        for t in llm_tool_calls:
+            findings.append({
+                "type": "tool_use", "name": t["variable"], "framework": t["framework"],
+                "matched": "tools=", "line": t["line"],
+                "tool_names": t.get("tool_names"),
+            })
+        for m in tool_use_markers:
+            findings.append({
+                "type": "tool_use", "name": None, "framework": None,
+                "matched": m["matched"], "line": m["line"],
+            })
+        # agent_marker: same idea as the tool_use markers above, for repos
+        # whose agent abstraction is hand-rolled (no tracked framework
+        # constructor to confirm against). framework stays null -- this is
+        # a located observation, never a confirmed agent, and it does NOT
+        # feed n_agents.
+        for m in agent_markers:
+            findings.append({
+                "type": "agent_marker", "name": None, "framework": None,
+                "matched": m["matched"], "line": m["line"],
             })
         findings.sort(key=lambda f: f["line"])
         result.findings = findings
@@ -336,24 +450,73 @@ def _resolve_expr_text(node):
         return ""
 
 
-def _match_constructor_text(call_or_base_text, category):
-    """Most SPECIFIC (longest pattern) match wins, not the alphabetically
-    first framework -- see CompiledCategory docstring for why this matters."""
+def _match_constructor_text(call_or_base_text, category, imported_frameworks=None, require_confirmation=True):
+    """
+    Two different uses need two different strictness levels here:
+
+    1. IDENTITY resolution (require_confirmation=True, the default) --
+       "which framework is this creation?" A framework-specific pattern is
+       only trusted if the file's own imports actually confirm it. If
+       nothing confirms a specific framework, this returns the best
+       GENERIC match instead (a generic label like "Direct Agent" isn't a
+       wrong specific guess -- it's honestly saying "something agent-shaped
+       was found, framework unconfirmed"). If there's no generic match
+       either, returns None rather than guessing a specific framework with
+       no evidence behind it.
+
+    2. ROLE-ONLY checks (require_confirmation=False) -- used by the
+       write/read/call detection below, where this function's return value
+       is only checked with `is None` to decide "does this call even look
+       like a write/read/call at all." The actual framework for those
+       comes from a completely separate mechanism (looking up which
+       variable the call was made on, via store_framework_by_var /
+       agent_framework_by_var) -- so applying import-confirmation HERE was
+       a real bug: it caused every write/read/call whose verb only exists
+       under a framework-specific row (not a generic one) to stop
+       registering as a write/read/call at all. Confirmed by testing
+       (`kb.add(...)` after `from chromadb import Chroma` stopped showing
+       up in write_sites once this function got stricter). Fixed by
+       skipping the confirmation requirement for this use case -- it never
+       needed it in the first place.
+
+    Trade-off, stated plainly, for use case 1: if MODULE_TO_FRAMEWORK
+    doesn't yet cover a framework's real import name, a genuine agent/store
+    using that framework will now go undetected here rather than being
+    (possibly wrongly) guessed. Deliberate choice: "say nothing" over
+    "confidently name the wrong framework."
+    """
     if category is None:
         return None
-    for pattern_str, label, regex, _is_generic in category._ranked:
-        if regex.search(call_or_base_text):
-            return label
-    return None
+    if not require_confirmation:
+        for pattern_str, label, regex, _is_generic in category._ranked:
+            if regex.search(call_or_base_text):
+                return label
+        return None
+    generic_match = None
+    for pattern_str, label, regex, is_generic in category._ranked:
+        if not regex.search(call_or_base_text):
+            continue
+        if not is_generic:
+            if imported_frameworks and label in imported_frameworks:
+                return label  # confirmed by import -- highest confidence, stop here
+            continue  # unconfirmed specific-framework match -- do NOT guess it
+        if generic_match is None:
+            generic_match = label
+    return generic_match
 
 
-def _build_subclass_extensions(tree, agent_creation_category, rag_creation_category):
+def _build_subclass_extensions(tree, agent_creation_category, rag_creation_category, import_aliases):
     """
     Detects `class X(KnownBase):` for both agent_creation and rag_creation
     bases. Returns (extra_agent_classes, extra_store_classes), each a dict
     {class_name: framework}, to be checked ALONGSIDE (not instead of) the
     normal compiled-pattern matching for every Call site in this file.
     Single-hop: a subclass of a subclass is not resolved.
+
+    Uses the same per-identifier confirmation as the main call resolution
+    (see _frameworks_for_call_identifier) -- a class base is only
+    confirmed against the framework IT specifically was imported from, not
+    "any framework imported anywhere in this file."
     """
     extra_agents, extra_stores = {}, {}
     for node in ast.walk(tree):
@@ -361,11 +524,21 @@ def _build_subclass_extensions(tree, agent_creation_category, rag_creation_categ
             continue
         for base in node.bases:
             base_text = _resolve_expr_text(base) + "("
-            fw = _match_constructor_text(base_text, agent_creation_category)
+            base_frameworks = _frameworks_for_call_identifier(base, import_aliases)
+            # Same canonical-form fallback as the main call resolution, so a
+            # renamed import used as a base class (`from autogen import
+            # AssistantAgent as AA` then `class X(AA):`) still matches a
+            # qualified registry pattern.
+            canonical_base_text = _canonical_call_text(base, import_aliases)
+            fw = _match_constructor_text(base_text, agent_creation_category, base_frameworks)
+            if fw is None and canonical_base_text:
+                fw = _match_constructor_text(canonical_base_text, agent_creation_category, base_frameworks)
             if fw is not None:
                 extra_agents[node.name] = fw
                 continue
-            fw = _match_constructor_text(base_text, rag_creation_category)
+            fw = _match_constructor_text(base_text, rag_creation_category, base_frameworks)
+            if fw is None and canonical_base_text:
+                fw = _match_constructor_text(canonical_base_text, rag_creation_category, base_frameworks)
             if fw is not None:
                 extra_stores[node.name] = fw
     return extra_agents, extra_stores
@@ -381,10 +554,50 @@ def _extract_name_kwarg(call_node):
     return None
 
 
+def _resolve_identity(node):
+    """
+    Resolves 'the thing this belongs to' to a single identity string,
+    walking down through however many chained attributes sit on top of the
+    base. Handles three shapes with one algorithm:
+      - a bare variable (`kb` -> "kb")
+      - an instance attribute assignment/receiver (`self.client` -> "self.client")
+      - a multi-segment SDK namespace chain with a bare base
+        (`client.chat.completions.create` -> "client", ignoring the
+        `.chat.completions.create` traversal entirely)
+      - the same chain with an instance-attribute base
+        (`self.client.chat.completions.create` -> "self.client")
+
+    The key distinction: if the walk bottoms out at a bare Name that ISN'T
+    `self`, that Name alone is the real identity -- everything above it
+    was just namespace traversal (`.chat.completions...`), not a separate
+    binding. If it bottoms out at `self`, `self` alone is never a
+    registered variable -- the ONE attribute immediately on top of it
+    (`self.client`) is the actual bound identity from a `self.client = ...`
+    assignment; anything further above that (`.chat.completions...`) is
+    still just traversal.
+
+    Confirmed as a real, broad gap by testing: `self.client = OpenAI()`
+    followed by `self.client.chat.completions.create(...)` previously went
+    completely unattributed, because only a bare `Name` was ever
+    recognized -- and assigning a creation to `self.attr` is one of the
+    most common patterns in real object-oriented agent code (confirmed in
+    NousResearch/hermes-agent's actual AIAgent class).
+    """
+    chain = []
+    while isinstance(node, ast.Attribute):
+        chain.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    if node.id == "self" and chain:
+        return f"self.{chain[-1]}"  # innermost attribute on self = the actual bound identity
+    return node.id
+
+
 def _extract_simple_target_name(targets):
-    if len(targets) == 1 and isinstance(targets[0], ast.Name):
-        return targets[0].id
-    return None
+    if len(targets) != 1:
+        return None
+    return _resolve_identity(targets[0])
 
 
 def _extract_tools_bound(call_node):
@@ -454,7 +667,213 @@ def _walk_with_function_context(node, current_function=None):
         yield from _walk_with_function_context(child, current_function)
 
 
-def _reduce_python(source, agent_creation_category, rag_creation_category, rag_writes_category, rag_reads_category=None, agent_calls_category=None):
+def _resolve_variable_aliases(tree, *framework_dicts):
+    """
+    Propagates plain variable-to-variable reassignment (`worker = kb`) so
+    `worker` inherits whatever `kb` already resolved to, letting a later
+    `worker.add(...)` still attribute correctly instead of being dropped as
+    unattributed. Only bare `x = y` counts as an alias -- `x = y.foo()` or
+    `x = SomeCall()` are handled separately by the creation-detection logic
+    above, not here.
+
+    Accepts any number of variable->framework dicts (store, agent, LLM
+    client, ...) and propagates aliases within each independently.
+
+    Fixed-point loop: repeats until nothing new is added, so a multi-hop
+    chain (`a = kb`, then later `b = a`) resolves correctly regardless of
+    which order the assignments appear in the source. Mutates the dicts
+    in place.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not isinstance(node.value, ast.Name):
+                continue
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            target = node.targets[0].id
+            source_var = node.value.id
+            for d in framework_dicts:
+                if source_var in d and target not in d:
+                    d[target] = d[source_var]
+                    changed = True
+
+
+def _frameworks_for_call_identifier(func_node, import_aliases):
+    """
+    Narrows framework confirmation to ONLY the framework(s) THIS SPECIFIC
+    call's identifier can actually be traced back to via an import --
+    not "is this framework imported anywhere in the file at all."
+
+    Confirmed as a real, exploitable gap by testing: a file that imports
+    Agno for a legitimate agent, but separately defines its own unrelated
+    local `class Workflow:`, had `Workflow()` wrongly confirmed as Agno --
+    purely because Agno appeared somewhere else in the same file's
+    imports, with no check that THIS "Workflow" identifier actually came
+    from Agno at all.
+
+    Bare call (`Workflow(...)`): resolve the bare name through
+    import_aliases. If it wasn't imported from anywhere (locally defined,
+    or a builtin), it returns an empty set -- it can't be confirmed as any
+    tracked framework, no matter what else the file imports.
+
+    Qualified call (`agno.Workflow(...)`, or an aliased module,
+    `ag.Workflow(...)`): the module is resolved from the qualifying
+    prefix's own import, not from the file's imports in general.
+    """
+    if isinstance(func_node, ast.Name):
+        canonical = import_aliases.get(func_node.id)
+        if canonical is None:
+            return set()
+        module_root = canonical.split(".")[0]
+    elif isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name):
+        base = func_node.value.id
+        canonical = import_aliases.get(base)
+        module_root = canonical.split(".")[0] if canonical else base
+    else:
+        return set()
+    fw = MODULE_TO_FRAMEWORK.get(module_root)
+    return {fw} if fw else set()
+
+
+LLM_CLIENT_CONSTRUCTORS = {
+    "OpenAI": "OpenAI SDK",
+    "AsyncOpenAI": "OpenAI SDK",
+    "Anthropic": "Anthropic SDK",
+    "AsyncAnthropic": "Anthropic SDK",
+}
+
+# Option A: tools are only reliably detectable for a CUSTOM (non-tracked-
+# framework) agent at the point they're actually handed to the LLM API --
+# every real implementation, however it's built internally, has to funnel
+# its tools through the SDK's own `tools=` parameter to reach the model at
+# all. This is confirmed the same way as everything else: the receiving
+# client must trace back to a real OpenAI/Anthropic SDK import.
+LLM_TOOL_CALL_METHODS = {"create", "stream"}  # .chat.completions.create(, .messages.create(, .messages.stream(
+
+
+def _extract_literal_tool_names(tools_node):
+    """
+    Best-effort: if `tools=` is a literal list/tuple, pull out every dict's
+    'name' key value found anywhere within it -- handles both OpenAI's
+    nested {"function": {"name": ...}} and Anthropic's flat {"name": ...}
+    schemas with the same simple walk, since it just looks for a "name"
+    key at any depth rather than assuming one specific shape.
+
+    Returns None (not an empty list) when tools_node isn't a literal list
+    at all -- e.g. `tools=get_tool_definitions()` (a real, confirmed
+    Hermes-agent pattern). None means "tool-calling is confirmed, but the
+    specific names can't be extracted without evaluating a function call,
+    which this project deliberately doesn't do" -- distinguishing "found
+    nothing" from "found something but couldn't see inside it" instead of
+    conflating the two into a bare empty list.
+    """
+    if not isinstance(tools_node, (ast.List, ast.Tuple)):
+        return None
+    names = []
+    for elt in tools_node.elts:
+        for node in ast.walk(elt):
+            if isinstance(node, ast.Dict):
+                for k, v in zip(node.keys, node.values):
+                    if (isinstance(k, ast.Constant) and k.value == "name"
+                            and isinstance(v, ast.Constant) and isinstance(v.value, str)):
+                        names.append(v.value)
+    return names
+
+
+# Marker patterns: plain line-based regex, NOT AST-verified like the rest
+# of this file. These catch custom, repo-specific conventions that have no
+# framework import to confirm them against -- so they're reported as
+# located observations (file + line, framework: null), never counted into
+# any confirmed metric.
+_TOOL_USE_MARKER_PATTERN = re.compile(
+    r"tool_registry|ToolRegistry\(|register_tool\(|get_tool_definitions\(|"
+    r"handle_function_call\(|discover_builtin_tools\("
+)
+
+# Agent markers: a repo building its own agent abstraction rather than
+# using a tracked framework's constructor. Word-boundary gated and
+# case-insensitive on "agent" so it catches AIAgent/BaseAgent/agent_loop/
+# run_agent etc. without firing on unrelated substrings ("management",
+# "agenda"). Deliberately broad -- this is the "something agent-shaped is
+# here" signal for repos like NousResearch/hermes-agent whose entire
+# agent implementation is hand-rolled and therefore invisible to
+# framework-based detection.
+_AGENT_MARKER_PATTERN = re.compile(
+    r"\bclass\s+\w*Agent\w*\b"           # class AIAgent, class BaseAgent
+    r"|\bdef\s+\w*agent\w*\s*\("          # def run_agent(, def build_agent(
+    r"|(?<![\w.])agents?\s*="             # agent = ..., agents = ... (bare only)
+    r"|\bself\.agents?\s*="               # self.agent = ...
+    r"|\bagent_loop\b|\brun_conversation\s*\(",
+    re.IGNORECASE,
+)
+# NB the `(?<![\w.])` guard on the assignment case: without it, this fired
+# on `user_agent = "Mozilla/5.0"` (an HTTP header, nothing to do with AI
+# agents) -- confirmed by testing. The paper's own Section III-B makes the
+# same point: "agent" appears in many unrelated contexts (user agents,
+# build agents), which is exactly why framework-based detection is the
+# primary signal and these markers are only a secondary, unconfirmed one.
+
+
+
+def _scan_line_markers(source_lines, pattern):
+    """Plain per-line regex scan -> [{line, matched}]. One hit per line
+    (the first match), so a single line can't flood the output."""
+    hits = []
+    for idx, text in enumerate(source_lines, start=1):
+        m = pattern.search(text)
+        if m:
+            hits.append({"line": idx, "matched": m.group(0).strip()})
+    return hits
+
+
+def _detect_tool_use_markers(source_lines):
+    return _scan_line_markers(source_lines, _TOOL_USE_MARKER_PATTERN)
+
+
+def _detect_agent_markers(source_lines):
+    return _scan_line_markers(source_lines, _AGENT_MARKER_PATTERN)
+
+
+
+def _canonical_call_text(func_node, import_aliases):
+    """
+    Rewrites a call's text into its CANONICAL (fully-qualified) form using
+    the file's own imports, so a locally-renamed import still matches a
+    registry pattern written in qualified form.
+
+    `from chromadb import Client as MyDB` then `MyDB()` produces call text
+    "MyDB(", which matches nothing -- the registry lists "chromadb.Client(".
+    Resolving MyDB -> chromadb.Client via the import table yields
+    "chromadb.Client(", which matches. Confirmed by testing: without this,
+    that exact (common) aliasing shape was completely invisible.
+
+    Returns None when there's nothing to rewrite (no matching import, or a
+    shape this doesn't handle), so callers can skip the extra match attempt.
+    """
+    if isinstance(func_node, ast.Name):
+        canonical = import_aliases.get(func_node.id)
+        return f"{canonical}(" if canonical else None
+    if isinstance(func_node, ast.Attribute):
+        # `cdb.Client(` where `import chromadb as cdb` -> `chromadb.Client(`
+        chain = []
+        node = func_node
+        while isinstance(node, ast.Attribute):
+            chain.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        canonical_base = import_aliases.get(node.id)
+        if not canonical_base:
+            return None
+        return canonical_base + "." + ".".join(reversed(chain)) + "("
+    return None
+
+
+def _reduce_python(source, agent_creation_category, rag_creation_category, rag_writes_category, rag_reads_category=None, agent_calls_category=None, external_exports=None):
     """
     Returns (reduced_text, parse_error, named_agents, named_stores,
     store_agent_links, tainted_writes).
@@ -462,18 +881,20 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as e:
-        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], []
+        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], [], []
     except RecursionError as e:
-        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], []
+        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], [], []
 
     source_lines = source.splitlines()
+    import_aliases = _build_import_aliases(tree)
     extra_agent_classes, extra_store_classes = _build_subclass_extensions(
-        tree, agent_creation_category, rag_creation_category
+        tree, agent_creation_category, rag_creation_category, import_aliases
     )
 
     lines = []
     pending_agent_calls = {}
     pending_store_calls = {}
+    pending_llm_clients = {}
     assign_target_for_call = {}
     assigns_by_func_and_name = {}  # (func_ctx, var_name) -> most recent Assign.value node
 
@@ -497,11 +918,39 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             call_text = f"{func_repr}("
             lines.append(call_text)
 
-            # Agent creation: normal compiled patterns, OR a subclass name
-            # resolved via _build_subclass_extensions.
+            # Agent creation. Role is decided by pattern shape (does this
+            # call look like an agent-creation call at all, across any
+            # framework's patterns?); import preference is now built
+            # directly into _match_constructor_text -- it scans every
+            # matching pattern and prefers whichever one the file's own
+            # imports actually confirm, only falling back to a plain
+            # specificity guess when nothing is confirmed. This ordering
+            # still matters for one reason: import resolution alone can't
+            # tell "VectorStoreIndex" (LlamaIndex, a STORE) apart from
+            # "ReActAgent" (LlamaIndex, an AGENT) -- both resolve to the
+            # same framework via import, so checking agent_creation_category
+            # first (and only proceeding to store-check if nothing matched)
+            # is what keeps a store from being wrongly read as an agent.
+            # Confirmed by testing.
+            #
+            # Framework confirmation is now scoped to THIS SPECIFIC call's
+            # identifier (via _frameworks_for_call_identifier), not "is the
+            # framework imported anywhere in this file." Confirmed as a
+            # real gap: a file importing Agno for a legitimate agent, but
+            # separately defining its own unrelated local `class Workflow`,
+            # previously had that unrelated Workflow() wrongly confirmed as
+            # Agno purely because Agno appeared elsewhere in the file.
+            call_frameworks = _frameworks_for_call_identifier(node.func, import_aliases)
+            # Canonical (fully-qualified) form of this call, via the file's
+            # own imports -- lets a locally-renamed import still match a
+            # registry pattern written in qualified form. See
+            # _canonical_call_text.
+            canonical_text = _canonical_call_text(node.func, import_aliases)
             framework = None
             if agent_creation_category is not None:
-                framework = _match_constructor_text(call_text, agent_creation_category)
+                framework = _match_constructor_text(call_text, agent_creation_category, call_frameworks)
+                if framework is None and canonical_text:
+                    framework = _match_constructor_text(canonical_text, agent_creation_category, call_frameworks)
             if framework is None and isinstance(node.func, ast.Name):
                 framework = extra_agent_classes.get(node.func.id)
             if framework is not None:
@@ -515,21 +964,36 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 }
                 continue  # a call site is either an agent or a store, not both
 
-            # Store creation: same idea, for rag_creation.
+            # Store creation: same role-first order as above.
             store_framework = None
             if rag_creation_category is not None:
-                store_framework = _match_constructor_text(call_text, rag_creation_category)
+                store_framework = _match_constructor_text(call_text, rag_creation_category, call_frameworks)
+                if store_framework is None and canonical_text:
+                    store_framework = _match_constructor_text(canonical_text, rag_creation_category, call_frameworks)
             if store_framework is None and isinstance(node.func, ast.Name):
                 store_framework = extra_store_classes.get(node.func.id)
-            if store_framework is None and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-                # classmethod factory shape, e.g. VectorStoreIndex.from_documents(...)
-                store_framework = _match_constructor_text(call_text, rag_creation_category)
             if store_framework is not None:
                 pending_store_calls[id(node)] = {
                     "framework": store_framework,
                     "line": node.lineno,
                     "call_node": node,
                     "matched_call": call_text,
+                }
+
+            # LLM SDK client creation (Option A foundation): confirms which
+            # variable is a real OpenAI/Anthropic client, so a later
+            # `.chat.completions.create(tools=...)` on it can be trusted as
+            # genuine tool-calling evidence rather than a guess. Same
+            # per-identifier import confirmation as everything else here.
+            llm_client_name = (
+                node.func.id if isinstance(node.func, ast.Name)
+                else node.func.attr if isinstance(node.func, ast.Attribute)
+                else None
+            )
+            if llm_client_name in LLM_CLIENT_CONSTRUCTORS and LLM_CLIENT_CONSTRUCTORS[llm_client_name] in call_frameworks:
+                pending_llm_clients[id(node)] = {
+                    "framework": LLM_CLIENT_CONSTRUCTORS[llm_client_name],
+                    "line": node.lineno,
                 }
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -561,6 +1025,14 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             "name": entry["name"], "framework": entry["framework"],
             "line": entry["line"], "tools_bound": entry["tools_bound"],
             "matched_call": entry["matched_call"],
+            # "variable" is the ASSIGNMENT TARGET, kept separate from "name"
+            # (which prefers a name=/role=/id= kwarg for display). Only the
+            # variable is importable from another module, so cross-file
+            # export keying must use this -- keying on "name" meant
+            # `researcher = Crew(role="analyst")` was exported as "analyst"
+            # and `from agents import researcher` could never match it.
+            # Confirmed by testing.
+            "variable": var_name,
         })
     agent_framework_by_var.update({
         var_name: entry["framework"]
@@ -584,6 +1056,77 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     # actual store the call was on).
     store_framework_by_var = {s["variable"]: s["framework"] for s in named_stores if s["variable"]}
 
+    # CROSS-FILE resolution: a store OR agent created in another file and
+    # imported here (`from store import kb`, `from agents import researcher`)
+    # now resolves, so a write/read/call on it is counted instead of being
+    # invisible. Confirmed necessary by testing, for BOTH kinds: without
+    # this, `from store import kb` then `kb.add(...)`, and `from agents
+    # import researcher` then `researcher.kickoff()`, each produced no
+    # finding at all -- systematically under-counting RAG interactions and
+    # agent calls in modular codebases.
+    #
+    # Still strictly evidence-based: the name must appear in a REAL import
+    # statement in THIS file, AND the module it names must have been seen
+    # in the first pass actually exporting that variable as a confirmed
+    # store/agent. A locally-defined name always wins over an imported one
+    # -- the *_framework_by_var tables are populated from this file's own
+    # creations first, and setdefault below never overwrites them.
+    if external_exports:
+        # Names reassigned anywhere in THIS file can't be trusted to still
+        # hold the imported object -- `from store import kb` followed by
+        # `kb = SomethingElse()` means the later kb.add(...) is NOT the
+        # imported store. Confirmed by testing: without this guard, that
+        # exact shape was wrongly attributed to Chroma.
+        locally_reassigned = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    ident = _resolve_identity(t)
+                    if ident:
+                        locally_reassigned.add(ident)
+
+        for kind, table in (("stores", store_framework_by_var), ("agents", agent_framework_by_var)):
+            exports_for_kind = external_exports.get(kind) or {}
+            if not exports_for_kind:
+                continue
+            for local_name, canonical in import_aliases.items():
+                if local_name in table:
+                    continue  # this file defines it itself -- local always wins
+                if local_name in locally_reassigned:
+                    continue  # rebound locally after import -- no longer provably the same object
+                if "." not in canonical:
+                    continue
+                module_path, _, imported_name = canonical.rpartition(".")
+                framework = exports_for_kind.get(module_path, {}).get(imported_name)
+                if framework:
+                    table.setdefault(local_name, framework)
+
+    # Rebuild known_store_vars AFTER cross-file resolution, so a store
+    # imported from another file also counts as "a known store" when
+    # checking `Agent(memory=kb)`-style links. Without this, an agent
+    # linked to an imported store formed no link at all, leaving
+    # rag_writers/rag_readers empty whenever the store, the agent and the
+    # write lived in three different files. Confirmed by testing.
+    known_store_vars = {v for v in store_framework_by_var}
+
+    llm_client_framework_by_var = {}
+    for call_id, entry in pending_llm_clients.items():
+        var_name = assign_target_for_call.get(call_id)
+        if var_name:
+            llm_client_framework_by_var[var_name] = entry["framework"]
+
+    # Variable-to-variable aliasing: `worker = kb` should let `worker`
+    # inherit whatever `kb` was already known to be, so a later
+    # `worker.add(...)` still resolves to Chroma instead of being silently
+    # dropped as unattributed. Confirmed as a real gap by testing (before
+    # this fix, exactly this pattern produced zero write_sites at all).
+    # Fixed-point loop, same idea as the file-import relevance propagation:
+    # repeats until nothing new is added, so multi-hop chains (`a = kb;
+    # b = a`) resolve regardless of source order. File-wide, not
+    # function-scoped -- same simplification already true of the
+    # underlying attribution dicts themselves.
+    _resolve_variable_aliases(tree, store_framework_by_var, agent_framework_by_var, llm_client_framework_by_var)
+
     # store_agent_links: direct kwarg-passing at agent-construction time,
     # e.g. Agent(memory=kb) where `kb` is a known store variable.
     store_agent_links = []
@@ -596,12 +1139,16 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 "line": entry["line"],
             })
 
-    # write_sites: EVERY rag_writes-category call site, with its receiver
-    # variable -- needed for rag_writers/rag_readers, which are about ALL
-    # writes/reads, not just tainted ones. tainted_writes was originally
-    # only recording the tainted subset, which silently dropped every
-    # non-risky write from the output entirely -- fixed to always record
-    # the site, with taint info attached as extra fields on top.
+    # write_sites: rag_writes-category call sites, but ONLY when the
+    # receiver resolves to a CONFIRMED framework (via store_framework_by_var
+    # -- i.e. this variable was actually created by a known vectorstore/
+    # memory constructor somewhere earlier in this file). Verbs like
+    # `.get(` are extremely generic -- without this filter, an ordinary
+    # dict/object call (e.g. `runtime.get("api_key")` on a plain runtime
+    # config object, nothing to do with any tracked framework) was showing
+    # up as a "read" finding with framework=null. Confirmed as real noise
+    # via testing against an actual repo. Unattributed sites are simply not
+    # recorded now, rather than kept with a null framework.
     write_sites = []
     if rag_writes_category is not None:
         for node, func_ctx in _walk_with_function_context(tree):
@@ -610,57 +1157,120 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             if not isinstance(node.func, ast.Attribute):
                 continue
             method_text = f".{node.func.attr}("
-            if _match_constructor_text(method_text, rag_writes_category) is None:
+            if _match_constructor_text(method_text, rag_writes_category, require_confirmation=False) is None:
                 continue
-            receiver = node.func.value.id if isinstance(node.func.value, ast.Name) else None
-            tainted, source = _is_write_argument_tainted(node, assigns_by_func_and_name, func_ctx)
+            receiver = _resolve_identity(node.func)
+            framework = store_framework_by_var.get(receiver)
+            if framework is None:
+                continue
+            # NB: named `taint_source`, NOT `source` -- an earlier version
+            # used `source` here, which silently shadowed the function's
+            # own `source` parameter (the file's text) for the rest of the
+            # function body. Harmless until something below actually
+            # needed the real source text, at which point it crashed.
+            tainted, taint_source = _is_write_argument_tainted(node, assigns_by_func_and_name, func_ctx)
             sanitized_nearby = _has_sanitizer_nearby(source_lines, node.lineno) if tainted else False
             write_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": store_framework_by_var.get(receiver),  # single resolved framework, or None if unattributed
-                "tainted": tainted, "taint_source": source,
+                "framework": framework,
+                "tainted": tainted, "taint_source": taint_source,
                 "sanitizer_nearby": sanitized_nearby,
                 "unsanitized": tainted and not sanitized_nearby,
             })
     tainted_writes = [w for w in write_sites if w["unsanitized"]]
 
-    # read_sites: same idea as write_sites but for rag_reads -- no taint
-    # check (reads don't have a write-time "was this checked" question the
-    # same way; a read's risk shows up in rag_influences_actions instead,
-    # not modeled here).
+    # llm_tool_calls: Option A. Every call on a CONFIRMED OpenAI/Anthropic
+    # client whose method looks like a real request (.create(/.stream(,
+    # covering .chat.completions.create(, .messages.create(,
+    # .messages.stream(, .responses.create()) and carries a `tools=`
+    # keyword. This is what lets a fully custom, non-tracked-framework
+    # agent (confirmed real-world case: NousResearch/hermes-agent) still
+    # register real tool usage -- every implementation has to hand its
+    # tools to the model through this exact parameter, however it built
+    # them internally.
+    llm_tool_calls = []
+    for node, func_ctx in _walk_with_function_context(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in LLM_TOOL_CALL_METHODS:
+            continue
+        base_var = _resolve_identity(node.func)
+        framework = llm_client_framework_by_var.get(base_var)
+        if framework is None:
+            continue
+        tools_kwarg = next((kw.value for kw in node.keywords if kw.arg == "tools"), None)
+        if tools_kwarg is None:
+            continue
+        tool_names = _extract_literal_tool_names(tools_kwarg)
+        llm_tool_calls.append({
+            "line": node.lineno, "variable": base_var, "framework": framework,
+            "tool_names": tool_names,  # None means confirmed-but-not-extractable, see docstring above
+        })
+
+    tool_use_markers = _detect_tool_use_markers(source_lines)
+    agent_markers = _detect_agent_markers(source_lines)
+
+    # read_sites: same confirmed-framework-only filter as write_sites.
     read_sites = []
     if rag_reads_category is not None:
         for node, func_ctx in _walk_with_function_context(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             method_text = f".{node.func.attr}("
-            if _match_constructor_text(method_text, rag_reads_category) is None:
+            if _match_constructor_text(method_text, rag_reads_category, require_confirmation=False) is None:
                 continue
-            receiver = node.func.value.id if isinstance(node.func.value, ast.Name) else None
+            receiver = _resolve_identity(node.func)
+            framework = store_framework_by_var.get(receiver)
+            if framework is None:
+                continue
             read_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": store_framework_by_var.get(receiver),
+                "framework": framework,
             })
 
-    # call_sites: agent_calls-category call sites, attributed to a single
-    # resolved framework via named_agents -- same deduplication idea as
-    # write_sites/read_sites above.
+    # call_sites: same confirmed-framework-only filter, resolved against
+    # named_agents instead of named_stores.
     call_sites = []
     if agent_calls_category is not None:
         for node, func_ctx in _walk_with_function_context(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             method_text = f".{node.func.attr}("
-            if _match_constructor_text(method_text, agent_calls_category) is None:
+            if _match_constructor_text(method_text, agent_calls_category, require_confirmation=False) is None:
                 continue
-            receiver = node.func.value.id if isinstance(node.func.value, ast.Name) else None
+            receiver = _resolve_identity(node.func)
+            framework = agent_framework_by_var.get(receiver)
+            if framework is None:
+                continue
             call_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": agent_framework_by_var.get(receiver),
+                "framework": framework,
             })
 
+    # imports: only kept for files that import AT LEAST ONE tracked
+    # framework -- a file with no framework import at all contributes no
+    # signal, so listing its (entirely stdlib/local) imports is pure noise.
+    # When the file DOES qualify, every import is kept, framework or not,
+    # so you can see the full picture of what that file pulls in.
+    imports = []
+    all_imports = []
+    has_tracked_framework = False
+    for local_name, canonical in sorted(import_aliases.items()):
+        module_root = canonical.split(".")[0]
+        framework = MODULE_TO_FRAMEWORK.get(module_root)
+        if framework:
+            has_tracked_framework = True
+        all_imports.append({
+            "local_name": local_name,
+            "canonical": canonical,
+            "framework": framework,
+        })
+    if has_tracked_framework:
+        imports = all_imports
+
     return ("\n".join(lines), None, named_agents, named_stores,
-            store_agent_links, tainted_writes, write_sites, read_sites, call_sites)
+            store_agent_links, tainted_writes, write_sites, read_sites, call_sites, imports,
+            llm_tool_calls, tool_use_markers, agent_markers)
 
 
 def _reduce_javascript(source):
