@@ -285,6 +285,7 @@ class PatternDetector:
         if size_bytes is not None and size_bytes > self.max_file_size_bytes:
             return FileResult(language=language, skipped_reason=f"file too large ({size_bytes} bytes)")
 
+        source_lines = source.splitlines()
         if language == "python":
             reduced = _reduce_python(
                 source, self._agent_creation_category,
@@ -298,7 +299,10 @@ class PatternDetector:
         else:
             reduced_text, parse_error = _reduce_javascript(source), None
             named_agents, named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], [], []
-            llm_tool_calls, tool_use_markers, agent_markers = [], [], []
+            # No AST reduction for JS/TS -- plain-text detectors only.
+            llm_tool_calls = _detect_bind_tools_calls(source_lines)
+            tool_use_markers = _detect_tool_use_markers(source_lines)
+            agent_markers = _detect_agent_markers(source_lines)
 
         result = FileResult(
             language=language, parse_error=parse_error,
@@ -315,11 +319,15 @@ class PatternDetector:
         # meant for scanning by eye / spot-checking against the source,
         # not for programmatic aggregation (radar_summary is still
         # computed from the structured lists above, not from this).
+        def _line_content(lineno):
+            return source_lines[lineno - 1].strip() if 0 < lineno <= len(source_lines) else None
+
         findings = []
         for a in named_agents:
             findings.append({
                 "type": "agent", "name": a["name"], "framework": a["framework"],
                 "matched": a.get("matched_call"), "line": a["line"],
+                "line_content": _line_content(a["line"]),
             })
         for s in named_stores:
             findings.append({
@@ -351,12 +359,13 @@ class PatternDetector:
             findings.append({
                 "type": "tool_use", "name": t["variable"], "framework": t["framework"],
                 "matched": "tools=", "line": t["line"],
-                "tool_names": t.get("tool_names"),
+                "line_content": _line_content(t["line"]), "tool_names": t.get("tool_names"),
             })
         for m in tool_use_markers:
             findings.append({
                 "type": "tool_use", "name": None, "framework": None,
                 "matched": m["matched"], "line": m["line"],
+                "line_content": _line_content(m["line"]),
             })
         # agent_marker: same idea as the tool_use markers above, for repos
         # whose agent abstraction is hand-rolled (no tracked framework
@@ -367,6 +376,7 @@ class PatternDetector:
             findings.append({
                 "type": "agent_marker", "name": None, "framework": None,
                 "matched": m["matched"], "line": m["line"],
+                "line_content": _line_content(m["line"]),
             })
         # custom_agent: a hand-rolled agent counted separately from
         # framework-confirmed ones (n_custom_agents in scan_api.py, not
@@ -375,7 +385,8 @@ class PatternDetector:
         for c in result.custom_agents:
             findings.append({
                 "type": "custom_agent", "name": c["variable"], "framework": c["framework"],
-                "matched": c.get("matched_call"), "line": c["line"], "tool_names": c.get("tool_names"),
+                "matched": c.get("matched_call"), "line": c["line"],
+                "line_content": _line_content(c["line"]), "tool_names": c.get("tool_names"),
             })
         findings.sort(key=lambda f: f["line"])
         result.findings = findings
@@ -942,6 +953,22 @@ def _detect_agent_markers(source_lines):
     return _scan_line_markers(source_lines, _AGENT_MARKER_PATTERN)
 
 
+# `.bind_tools(`/`.bindTools(` -- LangChain's API for handing tools to a
+# model outside its packaged agent constructors.
+_BIND_TOOLS_RE = re.compile(r"\b(\w+)\.(?:bind_tools|bindTools)\s*\(")
+
+
+def _detect_bind_tools_calls(source_lines):
+    hits = []
+    for idx, text in enumerate(source_lines, start=1):
+        m = _BIND_TOOLS_RE.search(text)
+        if m:
+            hits.append({
+                "line": idx, "variable": m.group(1), "framework": "LangChain",
+                "matched_call": m.group(0).strip(), "tool_names": None,
+            })
+    return hits
+
 
 def _canonical_call_text(func_node, import_aliases):
     """
@@ -1352,6 +1379,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             "matched_call": matched_call,
             "tool_names": tool_names,  # None means confirmed-but-not-extractable, see docstring above
         })
+
+    llm_tool_calls.extend(_detect_bind_tools_calls(source_lines))
 
     tool_use_markers = _detect_tool_use_markers(source_lines)
     agent_markers = _detect_agent_markers(source_lines)

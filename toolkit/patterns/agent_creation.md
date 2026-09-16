@@ -122,3 +122,10 @@ from beeai_framework.agents.requirement import RequirementAgent
   Together SDK, Instructor, js-agent) are intentionally excluded from this file — they
   provide model calls, not agent constructors. Their usage is picked up separately by
   the LLM-SDK detector, not here.
+- `.bind_tools(`/`.bindTools(` (LangChain's own API for handing tools to a model) is
+  also excluded here, for the opposite reason: called directly in a repo's own code
+  (rather than inside one of the LangChain constructors above), it's evidence of a
+  *custom*, hand-rolled agent, not "using the LangChain framework" — LangChain's own
+  agent constructors call it internally, hidden inside the library, so seeing it in
+  app code means that constructor was skipped. Counted as custom-agent evidence
+  (`n_custom_agents`) in pattern_detector.py, not via this table.
