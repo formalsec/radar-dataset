@@ -46,7 +46,7 @@ removed from this file — add them to Table II first if they should be tracked.
 | **Deep Agents JS** | `deepAgents(`<br>`@langchain/deep-agents`<br>`DeepAgent`<br>`DeepAgentConfig` |
 | **Bee Agent Framework** | `new ReActAgent(`<br>`new RequirementAgent(`<br>`@i-am-bee/beeai-framework`<br>`from 'beeai-framework'` |
 | **CopilotKit** | `useCopilotAction(`<br>`<CopilotKit`<br>`@copilotkit/react-core` |
-| **MCP SDK** | `new McpServer(`<br>`@modelcontextprotocol/sdk`<br>`Server(` from the MCP SDK namespace *(disambiguate from bare `MCP` — see Protocols note below)* |
+| **MCP SDK** | `new McpServer(`<br>`@modelcontextprotocol/sdk`<br>`Server(` from the MCP SDK namespace *(disambiguate from a bare "MCP" substring, which is deliberately NOT a pattern here — see Protocols note below)* |
 
 ---
 

@@ -129,6 +129,12 @@ _JS_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 # LlamaIndex-style constructors. TODO: extend from real examples.
 _STORE_LINK_KWARGS = ("memory", "vector_store", "vectorstore", "retriever", "knowledge", "store")
 
+# Modules whose own `.compile(` method has nothing to do with an agent
+# graph (re.compile, py_compile.compile, ...) but share the generic
+# "Graph Compile" pattern's bare `.compile(` text. TODO: extend as real
+# repos surface more such collisions.
+_NON_AGENT_COMPILE_MODULES = {"re", "regex", "py_compile", "_re"}
+
 # One-hop taint markers -- keyword-based, NOT real taint tracking. See
 # module docstring, point 4.
 TAINT_SOURCE_MARKERS = [
@@ -158,6 +164,7 @@ class FileResult:
     llm_tool_calls: list = field(default_factory=list)  # Option A: confirmed OpenAI/Anthropic tools= calls
     tool_use_markers: list = field(default_factory=list)  # custom tool-registration markers (line-located)
     agent_markers: list = field(default_factory=list)  # custom agent-abstraction markers (line-located)
+    custom_agents: list = field(default_factory=list)  # confirmed hand-rolled agents, see _group_custom_agents
 
 
 class CompiledCategory:
@@ -300,6 +307,7 @@ class PatternDetector:
             write_sites=write_sites, read_sites=read_sites, call_sites=call_sites,
             imports=imports, llm_tool_calls=llm_tool_calls,
             tool_use_markers=tool_use_markers, agent_markers=agent_markers,
+            custom_agents=_group_custom_agents(llm_tool_calls),
         )
 
         # ONE flat list, same shape for everything: what was found, what
@@ -359,6 +367,15 @@ class PatternDetector:
             findings.append({
                 "type": "agent_marker", "name": None, "framework": None,
                 "matched": m["matched"], "line": m["line"],
+            })
+        # custom_agent: a hand-rolled agent counted separately from
+        # framework-confirmed ones (n_custom_agents in scan_api.py, not
+        # n_agents) -- confirmed only via real tool-calling evidence
+        # (result.llm_tool_calls), never a guess.
+        for c in result.custom_agents:
+            findings.append({
+                "type": "custom_agent", "name": c["variable"], "framework": c["framework"],
+                "matched": c.get("matched_call"), "line": c["line"], "tool_names": c.get("tool_names"),
             })
         findings.sort(key=lambda f: f["line"])
         result.findings = findings
@@ -650,6 +667,26 @@ def _is_write_argument_tainted(call_node, assigns_by_func_and_name, func_ctx):
     return False, None
 
 
+def _find_starred_tools_value(call_node, assigns_by_func_and_name, func_ctx):
+    """`.create(**api_kwargs)` where `api_kwargs` was built (in this same
+    function) as a Dict literal containing a "tools" key -- the dominant
+    real shape SDK-wrapper code uses instead of a literal `tools=` keyword
+    at the call site itself (confirmed real via NousResearch/hermes-agent's
+    `api_kwargs = {..., "tools": self.tools}; client.create(**api_kwargs)`).
+    One-hop, same-function lookback -- same idea and same limits as the
+    taint-source lookback above, not real dataflow propagation."""
+    for kw in call_node.keywords:
+        if kw.arg is not None or not isinstance(kw.value, ast.Name):
+            continue
+        source = assigns_by_func_and_name.get((func_ctx, kw.value.id))
+        if not isinstance(source, ast.Dict):
+            continue
+        for k, v in zip(source.keys, source.values):
+            if isinstance(k, ast.Constant) and k.value == "tools":
+                return v
+    return None
+
+
 def _has_sanitizer_nearby(source_lines, line_no, window=5):
     start = max(0, line_no - window)
     context = " ".join(source_lines[start:line_no]).lower()
@@ -739,6 +776,41 @@ def _frameworks_for_call_identifier(func_node, import_aliases):
     return {fw} if fw else set()
 
 
+def _is_non_agent_compile_call(func_node, import_aliases):
+    """True when `func_node` -- the callee expression of an agent_creation
+    candidate call -- contains a `<module>.compile(` on a module in
+    _NON_AGENT_COMPILE_MODULES anywhere in it, e.g. `re.compile(...)`.
+
+    Needed because the generic "Graph Compile" agent_creation pattern is a
+    bare `\\.compile\\s*\\(` matched against the callee's full unparsed
+    text (call_text), meant for LangGraph's `workflow.compile()` but
+    textually indistinguishable from any other object's `.compile(`
+    method -- including one nested inside a larger expression, e.g.
+    `re.compile(...).match(` or `self._app.action(re.compile(...))(`,
+    where the OUTER call is `.match(`/`self._app.action(...)(` but the
+    substring match still fires because `_match_constructor_text` searches
+    the whole call_text, not just the outermost identifier. Walking the
+    same func_node subtree here (instead of only its outermost attribute)
+    mirrors that substring behavior so the exclusion actually cancels it.
+
+    Confirmed as a real, severe false-positive source by testing against
+    NousResearch/hermes-agent: 903 of 909 "agents" detected there were
+    plain `re.compile(...)` calls, plus 2 more from the nested shapes
+    above. Not specific to that repo -- any Python file that imports `re`
+    and calls `re.compile()` (nearly all of them) hits this.
+    """
+    for node in ast.walk(func_node):
+        if not (isinstance(node, ast.Attribute) and node.attr == "compile"):
+            continue
+        base = node.value
+        if not isinstance(base, ast.Name):
+            continue
+        canonical = import_aliases.get(base.id, base.id)
+        if canonical.split(".")[0] in _NON_AGENT_COMPILE_MODULES:
+            return True
+    return False
+
+
 LLM_CLIENT_CONSTRUCTORS = {
     "OpenAI": "OpenAI SDK",
     "AsyncOpenAI": "OpenAI SDK",
@@ -753,6 +825,38 @@ LLM_CLIENT_CONSTRUCTORS = {
 # all. This is confirmed the same way as everything else: the receiving
 # client must trace back to a real OpenAI/Anthropic SDK import.
 LLM_TOOL_CALL_METHODS = {"create", "stream"}  # .chat.completions.create(, .messages.create(, .messages.stream(
+
+
+def _build_llm_client_factory_functions(tree, import_aliases):
+    """
+    Detects `def f(...): ... return OpenAI(...)` (or AsyncOpenAI/Anthropic/
+    AsyncAnthropic) defined in THIS file -- single-hop, same idea as
+    _build_subclass_extensions -- so `self.client = self._init_client(...)`
+    still resolves to the real SDK framework even though the constructor
+    call itself lives in a different function's body than the assignment.
+    Confirmed necessary by testing against NousResearch/hermes-agent, whose
+    client is built through exactly this indirection; without it, the
+    client variable never registers, so a later confirmed `tools=` call on
+    it goes completely undetected.
+    """
+    factories = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for stmt in ast.walk(fn):
+            if not (isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call)):
+                continue
+            call = stmt.value
+            name = (call.func.id if isinstance(call.func, ast.Name)
+                    else call.func.attr if isinstance(call.func, ast.Attribute)
+                    else None)
+            if name not in LLM_CLIENT_CONSTRUCTORS:
+                continue
+            call_frameworks = _frameworks_for_call_identifier(call.func, import_aliases)
+            if LLM_CLIENT_CONSTRUCTORS[name] in call_frameworks:
+                factories[fn.name] = LLM_CLIENT_CONSTRUCTORS[name]
+                break
+    return factories
 
 
 def _extract_literal_tool_names(tools_node):
@@ -873,6 +977,33 @@ def _canonical_call_text(func_node, import_aliases):
     return None
 
 
+def _group_custom_agents(llm_tool_calls):
+    """
+    Collapses per-CALL llm_tool_calls entries into one entry per distinct
+    (client variable) -- a hand-rolled agent that loops and calls
+    `.create(tools=...)` many times must count as ONE agent, not one per
+    call. Mirrors how named_agents already counts one entry per creation
+    site rather than per later `.run()` call.
+    """
+    agents_by_var = {}
+    ordered = []
+    for t in llm_tool_calls:
+        var = t["variable"]
+        entry = agents_by_var.get(var)
+        if entry is None:
+            entry = {
+                "variable": var, "framework": t["framework"], "line": t["line"],
+                "matched_call": t.get("matched_call"), "tool_names": set(),
+            }
+            agents_by_var[var] = entry
+            ordered.append(entry)
+        if t.get("tool_names"):
+            entry["tool_names"].update(t["tool_names"])
+    for entry in ordered:
+        entry["tool_names"] = sorted(entry["tool_names"]) if entry["tool_names"] else None
+    return ordered
+
+
 def _reduce_python(source, agent_creation_category, rag_creation_category, rag_writes_category, rag_reads_category=None, agent_calls_category=None, external_exports=None):
     """
     Returns (reduced_text, parse_error, named_agents, named_stores,
@@ -890,6 +1021,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     extra_agent_classes, extra_store_classes = _build_subclass_extensions(
         tree, agent_creation_category, rag_creation_category, import_aliases
     )
+    llm_client_factory_functions = _build_llm_client_factory_functions(tree, import_aliases)
 
     lines = []
     pending_agent_calls = {}
@@ -951,6 +1083,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 framework = _match_constructor_text(call_text, agent_creation_category, call_frameworks)
                 if framework is None and canonical_text:
                     framework = _match_constructor_text(canonical_text, agent_creation_category, call_frameworks)
+                if framework is not None and _is_non_agent_compile_call(node.func, import_aliases):
+                    framework = None
             if framework is None and isinstance(node.func, ast.Name):
                 framework = extra_agent_classes.get(node.func.id)
             if framework is not None:
@@ -993,6 +1127,11 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             if llm_client_name in LLM_CLIENT_CONSTRUCTORS and LLM_CLIENT_CONSTRUCTORS[llm_client_name] in call_frameworks:
                 pending_llm_clients[id(node)] = {
                     "framework": LLM_CLIENT_CONSTRUCTORS[llm_client_name],
+                    "line": node.lineno,
+                }
+            elif llm_client_name in llm_client_factory_functions:
+                pending_llm_clients[id(node)] = {
+                    "framework": llm_client_factory_functions[llm_client_name],
                     "line": node.lineno,
                 }
 
@@ -1200,10 +1339,17 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             continue
         tools_kwarg = next((kw.value for kw in node.keywords if kw.arg == "tools"), None)
         if tools_kwarg is None:
+            tools_kwarg = _find_starred_tools_value(node, assigns_by_func_and_name, func_ctx)
+        if tools_kwarg is None:
             continue
         tool_names = _extract_literal_tool_names(tools_kwarg)
+        try:
+            matched_call = f"{ast.unparse(node.func)}("  # e.g. "self.client.chat.completions.create(" -- the actual evidence primitive
+        except Exception:
+            matched_call = f".{node.func.attr}("
         llm_tool_calls.append({
             "line": node.lineno, "variable": base_var, "framework": framework,
+            "matched_call": matched_call,
             "tool_names": tool_names,  # None means confirmed-but-not-extractable, see docstring above
         })
 

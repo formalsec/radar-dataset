@@ -98,7 +98,6 @@
         ],
         "MCP SDK": [
           "@modelcontextprotocol/sdk",
-          "MCP",
           "Server(",
           "new McpServer("
         ],
@@ -429,8 +428,7 @@
           "vector_store.similarity_search("
         ],
         "Haystack": [
-          ".run(",
-          "Retriever("
+          ".run("
         ],
         "LangChain": [
           ".asRetriever(",

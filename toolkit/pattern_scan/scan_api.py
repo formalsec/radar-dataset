@@ -45,7 +45,7 @@ _DEFAULT_RESULTS_DIR = _PACKAGE_DIR / "results"
 EXCLUDED_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
     "dist", "build", ".next", ".turbo", "site-packages", ".mypy_cache",
-    ".pytest_cache", "coverage", ".tox", "vendor",
+    ".pytest_cache", "coverage", ".tox", "vendor", "test", "tests", "evals",
 }
 RELEVANT_EXTENSIONS = set(EXTENSION_LANGUAGE_MAP.keys())
 
@@ -114,6 +114,7 @@ def scan_tarball(detector, tar_bytes):
     files_scanned = 0
     findings = []
     agent_instances = []   # kept internally for radar_summary math (not returned raw)
+    custom_agent_instances = []
     store_instances = []
     store_agent_links = []
     write_sites = []
@@ -134,6 +135,8 @@ def scan_tarball(detector, tar_bytes):
 
         for a in result.named_agents:
             agent_instances.append({"name": a["name"], "tools_bound": a["tools_bound"]})
+        for c in result.custom_agents:
+            custom_agent_instances.append(c)
         for s in result.named_stores:
             store_instances.append({"variable": s["variable"]})
         for link in result.store_agent_links:
@@ -145,8 +148,23 @@ def scan_tarball(detector, tar_bytes):
 
     findings.sort(key=lambda f: (f["file"], f["line"]))
 
+    # Evidence for both agent counts below.
+    agent_evidence = [
+        {"name": f["name"], "framework": f["framework"], "matched": f["matched"],
+         "file": f["file"], "line": f["line"]}
+        for f in findings if f["type"] == "agent"
+    ]
+    custom_agent_evidence = [
+        {"name": f["name"], "framework": f["framework"], "matched": f["matched"],
+         "file": f["file"], "line": f["line"], "tool_names": f.get("tool_names")}
+        for f in findings if f["type"] == "custom_agent"
+    ]
+
+    # n_agents counts every confirmed agent-creation call site, not unique
+    # names -- deduping by name repo-wide was collapsing distinct agents in
+    # different files that happen to share a common local variable name.
     unique_agent_names = sorted({a["name"] for a in agent_instances if a["name"]})
-    n_agents = len(unique_agent_names) or sum(1 for a in agent_instances if not a["name"])
+    n_agents = len(agent_instances)
     tools_bound_all = set()
     for a in agent_instances:
         tools_bound_all.update(a.get("tools_bound", []))
@@ -168,9 +186,20 @@ def scan_tarball(detector, tar_bytes):
     })
     unsanitized_writes = any(w["unsanitized"] for w in write_sites)
 
+    # n_custom_agents: hand-rolled agents (no tracked framework) confirmed
+    # only via real tool-calling evidence 
+    custom_agent_llm_tool_names = sorted({
+        name for c in custom_agent_instances for name in (c.get("tool_names") or [])
+    })
+
     radar_summary = {
         "n_agents": n_agents,
         "agent_names": unique_agent_names,
+        "n_custom_agents": len(custom_agent_instances),
+        "agent_evidence": agent_evidence,
+        "custom_agent_evidence": custom_agent_evidence,
+        "has_confirmed_llm_tool_calling": len(custom_agent_instances) > 0,
+        "llm_tool_names": custom_agent_llm_tool_names,
         "n_tools": n_tools,
         "has_rag": has_rag,
         "shared_across_agents": shared_across_agents,
