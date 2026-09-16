@@ -151,19 +151,19 @@ def scan_tarball(detector, tar_bytes):
     # Evidence for both agent counts below.
     agent_evidence = [
         {"name": f["name"], "framework": f["framework"], "matched": f["matched"],
-         "file": f["file"], "line": f["line"]}
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content")}
         for f in findings if f["type"] == "agent"
     ]
     custom_agent_evidence = [
         {"name": f["name"], "framework": f["framework"], "matched": f["matched"],
-         "file": f["file"], "line": f["line"], "tool_names": f.get("tool_names")}
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "tool_names": f.get("tool_names")}
         for f in findings if f["type"] == "custom_agent"
     ]
 
     # n_agents counts every confirmed agent-creation call site, not unique
     # names -- deduping by name repo-wide was collapsing distinct agents in
     # different files that happen to share a common local variable name.
-    unique_agent_names = sorted({a["name"] for a in agent_instances if a["name"]})
     n_agents = len(agent_instances)
     tools_bound_all = set()
     for a in agent_instances:
@@ -194,9 +194,8 @@ def scan_tarball(detector, tar_bytes):
 
     radar_summary = {
         "n_agents": n_agents,
-        "agent_names": unique_agent_names,
-        "n_custom_agents": len(custom_agent_instances),
         "agent_evidence": agent_evidence,
+        "n_custom_agents": len(custom_agent_instances),
         "custom_agent_evidence": custom_agent_evidence,
         "has_confirmed_llm_tool_calling": len(custom_agent_instances) > 0,
         "llm_tool_names": custom_agent_llm_tool_names,

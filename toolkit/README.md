@@ -171,7 +171,6 @@ computed:
 | Field | Plain meaning |
 |---|---|
 | `n_agents` | How many agents this repo creates |
-| `agent_names` | Their names (for reference — can be fewer than `n_agents` if names repeat) |
 | `n_tools` | How many tools are actually usable by an agent (not just present) |
 | `has_rag` | Does this repo use any memory/vector database at all |
 | `shared_across_agents` | Do two or more agents use the *same* memory database |
