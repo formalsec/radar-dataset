@@ -120,12 +120,19 @@ def scan_tarball(detector, tar_bytes):
     write_sites = []
     read_sites = []
 
+    # Supply local JS/TS modules for tools passed through imported factories.
+    javascript_sources = {
+        rel: text for rel, text, size, relevant in iter_tarball_source_files(tar_bytes)
+        if relevant and text is not None and size <= detector.max_file_size_bytes
+        and EXTENSION_LANGUAGE_MAP.get(Path(rel).suffix.lower()) == "javascript"
+    }
     for rel, text, size_bytes, is_relevant in iter_tarball_source_files(tar_bytes):
         total_files += 1
         if not is_relevant or text is None:
             continue
 
-        result = detector.analyze_source(text, rel, size_bytes=size_bytes)
+        result = detector.analyze_source(text, rel, size_bytes=size_bytes,
+                                         javascript_sources=javascript_sources)
         if result.skipped_reason:
             continue
         files_scanned += 1

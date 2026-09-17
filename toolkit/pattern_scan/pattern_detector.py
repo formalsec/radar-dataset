@@ -100,6 +100,7 @@ def _build_import_aliases(tree):
     return aliases
 
 import json
+import posixpath
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -243,6 +244,11 @@ class PatternDetector:
             cat: CompiledCategory(data["frameworks"], data["generic"])
             for cat, data in raw["categories"].items()
         }
+        # language(s) each framework's patterns were written for; absent = unrestricted
+        self._framework_languages = {
+            cat: data.get("framework_languages", {})
+            for cat, data in raw["categories"].items()
+        }
         self.max_file_size_bytes = max_file_size_bytes
         self._agent_creation_category = self.categories.get("agent_creation")
         self._rag_creation_category = self.categories.get("rag_creation")
@@ -267,7 +273,8 @@ class PatternDetector:
             return FileResult(language=language, skipped_reason=f"read failed: {e}")
         return self.analyze_source(source, filepath.name)
 
-    def analyze_source(self, source, filename, size_bytes=None, external_exports=None):
+    def analyze_source(self, source, filename, size_bytes=None, external_exports=None,
+                       javascript_sources=None):
         """
         external_exports: optional {"stores": {module: {var: framework}},
         "agents": {module: {var: framework}}} collected from a FIRST pass
@@ -298,8 +305,13 @@ class PatternDetector:
              llm_tool_calls, tool_use_markers, agent_markers) = reduced
         else:
             reduced_text, parse_error = _reduce_javascript(source), None
-            named_agents, named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], [], []
+            named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], []
             # No AST reduction for JS/TS -- plain-text detectors only.
+            named_agents = _detect_js_named_agents(
+                source_lines, self._agent_creation_category,
+                self._framework_languages.get("agent_creation", {}),
+                filename, javascript_sources,
+            )
             llm_tool_calls = _detect_bind_tools_calls(source_lines)
             tool_use_markers = _detect_tool_use_markers(source_lines)
             agent_markers = _detect_agent_markers(source_lines)
@@ -433,8 +445,12 @@ class PatternDetector:
         for cat_name, compiled_cat in self.categories.items():
             if cat_name in dedup_done:
                 continue
+            allowed_langs_by_fw = self._framework_languages.get(cat_name, {})
             cat_out = {}
             for fw_name, patterns in compiled_cat.frameworks.items():
+                allowed_langs = allowed_langs_by_fw.get(fw_name)
+                if allowed_langs is not None and language not in allowed_langs:
+                    continue
                 count, matched = _match_patterns(patterns, reduced_text)
                 if count:
                     cat_out[fw_name] = {"count": count, "patterns_matched": matched}
@@ -943,6 +959,160 @@ def _scan_line_markers(source_lines, pattern):
         if m:
             hits.append({"line": idx, "matched": m.group(0).strip()})
     return hits
+
+
+# A small lexical pass keeps comments/strings out of creation counts and lets
+# tool extraction balance nested object literals without a JS parser dependency.
+_JS_TOKEN_RE = re.compile(
+    r"//[^\n]*|/\*.*?\*/|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|"
+    r"`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|\.\.\.|[^\s]", re.DOTALL,
+)
+_JS_GRAPH_COMPILE_CONTEXT_RE = re.compile(r"StateGraph\s*\(|\.addNode\s*\(")
+
+
+def _js_tokens(source):
+    return [m for m in _JS_TOKEN_RE.finditer(source)
+            if not m.group().startswith(("//", "/*"))]
+
+
+def _js_parts(tokens):
+    """Split comma-separated expressions, keeping nested expressions intact."""
+    start, depth = 0, 0
+    for i, token in enumerate(tokens):
+        if token in ("(", "[", "{"):
+            depth += 1
+        elif token in (")", "]", "}"):
+            depth -= 1
+        elif token == "," and depth == 0:
+            yield tokens[start:i]
+            start = i + 1
+    yield tokens[start:]
+
+
+def _js_group(tokens, start):
+    depth = 0
+    for i in range(start, len(tokens)):
+        if tokens[i] in ("(", "[", "{"):
+            depth += 1
+        elif tokens[i] in (")", "]", "}"):
+            depth -= 1
+            if depth == 0:
+                return tokens[start + 1:i]
+    return []
+
+
+def _js_property(tokens, name):
+    for part in _js_parts(tokens):
+        if len(part) > 2 and part[0].strip("\"'") == name and part[1] == ":":
+            return part[2:]
+    return []
+
+
+def _js_tools(expression, tokens, filename, sources, seen=frozenset()):
+    """Resolve explicit arrays, local bindings and one-hop imported factories.
+
+    This counts statically supplied tools across modes, not framework defaults
+    or the tools active in one particular runtime invocation.
+    """
+    if not expression:
+        return []
+    if expression[0] == "[":
+        return [name for part in _js_parts(_js_group(expression, 0))
+                for name in _js_tools(part, tokens, filename, sources, seen)]
+    if expression[0] == "...":
+        return _js_tools(expression[1:], tokens, filename, sources, seen)
+    if expression[:1] == ["new"] and len(expression) > 3 and expression[3] == "{":
+        name = _js_property(_js_group(expression, 3), "name")
+        return [name[0][1:-1]] if name and name[0].startswith(("'", '\"')) else []
+    name = expression[0]
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+        return []
+    key = (filename, name)
+    if key in seen:
+        return []
+    seen = seen | {key}
+    is_call = len(expression) > 1 and expression[1] == "("
+    for i, token in enumerate(tokens):
+        if token in ("const", "let", "var") and tokens[i + 1:i + 3] == [name, "="]:
+            value = next(_js_parts(tokens[i + 3:]))
+            return _js_tools(value, tokens, filename, sources, seen)
+        if is_call and token == "function" and tokens[i + 1:i + 3] == [name, "("]:
+            params = _js_group(tokens, i + 2)
+            body_start = i + 4 + len(params)
+            # Skip a simple TypeScript return annotation (e.g. Tool[]).
+            while body_start < len(tokens) and tokens[body_start] != "{":
+                body_start += 1
+            body = _js_group(tokens, body_start)
+            tools, depth = [], 0
+            for j, value in enumerate(body):
+                if value == "return" and depth == 0 and body[j + 1:j + 2] == ["["]:
+                    tools.extend(_js_tools(body[j + 1:], body, filename, sources, seen))
+                if value in ("(", "[", "{"):
+                    depth += 1
+                elif value in (")", "]", "}"):
+                    depth -= 1
+            return tools
+        if token == "import" and tokens[i + 1:i + 2] == ["{"]:
+            imports = _js_group(tokens, i + 1)
+            tail = tokens[i + len(imports) + 3:i + len(imports) + 5]
+            if len(tail) != 2 or tail[0] != "from" or not sources:
+                continue
+            for part in _js_parts(imports):
+                if not part or part[-1] != name:
+                    continue
+                module = tail[1][1:-1]
+                if not module.startswith("."):
+                    continue
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(filename), module))
+                stem = posixpath.splitext(target)[0]
+                for path in (target, stem + ".ts", stem + ".tsx", target + ".ts", target + "/index.ts"):
+                    if path in sources:
+                        imported = [m.group() for m in _js_tokens(sources[path])]
+                        return _js_tools([part[0], *expression[1:]], imported, path, {}, seen)
+    # Match Python's explicit-list behavior for unresolved tool variables.
+    return [] if is_call else [name]
+
+
+def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs_by_fw,
+                            filename="", javascript_sources=None):
+    if agent_creation_category is None:
+        return []
+    source = "\n".join(source_lines)
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    # Preserve offsets and line numbers while hiding non-code evidence.
+    code = list(re.sub(r"[^\n]", " ", source))
+    for m in matches:
+        if not m.group().startswith(("'", '\"', "`")):
+            code[m.start():m.end()] = m.group()
+    code = "".join(code)
+    has_graph_context = bool(_JS_GRAPH_COMPILE_CONTEXT_RE.search(code))
+    call_tokens = {m.start(): i for i, m in enumerate(matches) if m.group() == "("}
+    hits, seen = [], set()
+    for pattern_str, label, regex, _is_generic in agent_creation_category._ranked:
+        allowed_langs = allowed_langs_by_fw.get(label)
+        # new McpServer(/new Server( creates a tool-exposing server, not an LLM agent -- excluded from n_agents
+        if label == "MCP SDK" or (allowed_langs is not None and "javascript" not in allowed_langs):
+            continue
+        if "(" not in pattern_str:
+            continue
+        for m in regex.finditer(code):
+            opening = code.find("(", m.start(), m.end())
+            if opening not in call_tokens or opening in seen:
+                continue
+            if re.fullmatch(r"\.compile\s*\(", m.group().strip()) and not has_graph_context:
+                continue
+            seen.add(opening)
+            args = _js_group(tokens, call_tokens[opening])
+            options = _js_group(args, 0) if args[:1] == ["{"] else []
+            hits.append({
+                "name": None, "framework": label,
+                "line": source.count("\n", 0, m.start()) + 1,
+                "matched_call": m.group().strip(),
+                "tools_bound": _js_tools(_js_property(options, "tools"), tokens,
+                                         filename, javascript_sources),
+            })
+    return sorted(hits, key=lambda hit: hit["line"])
 
 
 def _detect_tool_use_markers(source_lines):
