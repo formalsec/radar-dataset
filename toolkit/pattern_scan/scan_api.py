@@ -177,6 +177,12 @@ def scan_tarball(detector, tar_bytes):
          "tool_names": f.get("tool_names")}
         for f in findings if f["type"] == "custom_agent"
     ]
+    tools_evidence = [
+        {"name": tool_name, "agent": f["name"], "framework": f["framework"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content")}
+        for f in findings if f["type"] == "agent"
+        for tool_name in (f.get("tools_bound") or [])
+    ]
 
     # n_agents counts every confirmed agent-creation call site, not unique
     # names -- deduping by name repo-wide was collapsing distinct agents in
@@ -222,6 +228,7 @@ def scan_tarball(detector, tar_bytes):
         "has_confirmed_llm_tool_calling": len(custom_agent_instances) > 0,
         "llm_tool_names": custom_agent_llm_tool_names,
         "n_tools": n_tools,
+        "tools_evidence": tools_evidence,
         "has_rag": has_rag,
         "shared_across_agents": shared_across_agents,
         "rag_writers": rag_writers,

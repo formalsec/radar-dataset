@@ -380,7 +380,7 @@ class PatternDetector:
             findings.append({
                 "type": "agent", "name": a["name"], "framework": a["framework"],
                 "matched": a.get("matched_call"), "line": a["line"],
-                "line_content": _line_content(a["line"]),
+                "line_content": _line_content(a["line"]), "tools_bound": a.get("tools_bound"),
             })
         for s in named_stores:
             findings.append({
@@ -701,13 +701,39 @@ def _wrapping_call_framework(call_node, var_name, prelim_framework_by_var):
     return prelim_framework_by_var.get(receiver)
 
 
-def _extract_tools_bound(call_node):
+def _tool_element_identifier(elt):
+    """Best-effort identifier for one element of a `tools=[...]` list: a bare
+    name (`search_tool`) or a tool-factory call (`get_search_ddg_tool()`) --
+    the latter is the dominant real shape for repos that build each Tool via
+    a small wrapper function, confirmed in naotaka1128/web_bowsing_agent's
+    `tools = [get_search_ddg_tool(), get_fetch_page_tool()]`."""
+    if isinstance(elt, ast.Name):
+        return elt.id
+    if isinstance(elt, ast.Call):
+        func = elt.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+    return None
+
+
+def _extract_tools_bound(call_node, assigns_by_func_and_name=None, func_ctx=None):
     """`Agent(tools=[search_tool, calc_tool])` -> ["search_tool", "calc_tool"].
-    Attribution-gated tool counting: a tool only counts if it actually shows
-    up here, not just anywhere in the repo."""
+    Also resolves one-hop variable indirection (`tools = [...]` assigned
+    earlier in the same function, then passed as `tools=tools`) -- confirmed
+    a real, common gap by testing: without it, the dominant "build the list
+    once, pass the variable" shape produced zero tools_bound. Attribution-
+    gated tool counting: a tool only counts if it actually shows up here,
+    not just anywhere in the repo."""
     for kw in call_node.keywords:
-        if kw.arg == "tools" and isinstance(kw.value, (ast.List, ast.Tuple)):
-            return [elt.id for elt in kw.value.elts if isinstance(elt, ast.Name)]
+        if kw.arg != "tools":
+            continue
+        value = kw.value
+        if isinstance(value, ast.Name) and assigns_by_func_and_name is not None:
+            value = assigns_by_func_and_name.get((func_ctx, value.id), value)
+        if isinstance(value, (ast.List, ast.Tuple)):
+            return [name for name in (_tool_element_identifier(e) for e in value.elts) if name]
     return []
 
 
@@ -1360,7 +1386,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     "framework": framework,
                     "name": _extract_name_kwarg(node),
                     "line": node.lineno,
-                    "tools_bound": _extract_tools_bound(node),
+                    "tools_bound": _extract_tools_bound(node, assigns_by_func_and_name, func_ctx),
                     "call_node": node,
                     "matched_call": call_text,  # e.g. "SolidAssistantAgent(" -- so you can eyeball-confirm the match
                 }
