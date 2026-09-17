@@ -112,6 +112,7 @@ def scan_tarball(detector, tar_bytes):
     """
     total_files = 0
     files_scanned = 0
+    files_with_parse_errors = 0
     findings = []
     agent_instances = []   # kept internally for radar_summary math (not returned raw)
     custom_agent_instances = []
@@ -136,6 +137,15 @@ def scan_tarball(detector, tar_bytes):
         if result.skipped_reason:
             continue
         files_scanned += 1
+        # `files_scanned` already counted this file above -- a parse error
+        # (e.g. unresolved git-conflict markers, see test_counts.py) does
+        # NOT skip a file, it just leaves it with empty findings, so
+        # "scanned" alone doesn't tell you whether a file's contents were
+        # actually analyzed. Surfaced separately rather than folded into
+        # skipped_reason, so files_scanned keeps its existing meaning for
+        # any code/report already relying on it.
+        if result.parse_error:
+            files_with_parse_errors += 1
 
         for f in result.findings:
             findings.append({**f, "file": rel})
@@ -194,7 +204,12 @@ def scan_tarball(detector, tar_bytes):
     unsanitized_writes = any(w["unsanitized"] for w in write_sites)
 
     # n_custom_agents: hand-rolled agents (no tracked framework) confirmed
-    # only via real tool-calling evidence 
+    # only via real tool-calling evidence. NOT guaranteed disjoint from
+    # n_agents: a file can have a framework-confirmed agent (e.g. a
+    # LangGraph StateGraph) AND separately bind tools to a model via
+    # `.bind_tools(` for one of that graph's nodes -- the same construction
+    # step, not a second agent. n_agents + n_custom_agents is a ceiling on
+    # a repo's agent count, not a verified total.
     custom_agent_llm_tool_names = sorted({
         name for c in custom_agent_instances for name in (c.get("tool_names") or [])
     })
@@ -224,6 +239,7 @@ def scan_tarball(detector, tar_bytes):
     return {
         "total_files": total_files,
         "files_scanned": files_scanned,
+        "files_with_parse_errors": files_with_parse_errors,
         "radar_summary": radar_summary,
         "findings": findings,
         "_detected_frameworks": sorted(detected_frameworks),  # consumed by build_output_record, not meant as final output
