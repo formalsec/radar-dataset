@@ -21,16 +21,19 @@ removed from this file — add them to Table II first if they should be tracked.
 | Framework | Detection Patterns |
 |-----------|-------------------|
 | **Agno** | `from agno.agent import Agent`<br>`agno\.Agent`<br>`Agent(`<br>`Team(`<br>`Workflow(`<br>`@agent`<br>`@crew`<br>`@tool`<br>`.run(`<br>`.arun(` |
-| **LangChain** | `create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
-| **LangGraph** | `StateGraph(`<br>`MessageGraph(`<br>`.add_node(`<br>`.compile(`<br>`create_react_agent(`<br>`MemorySaver(`<br>`SqliteSaver(` |
-| **CrewAI** | `Agent(`<br>`Crew(`<br>`@agent`<br>`@crew`<br>`Process.sequential`<br>`Process.hierarchical` |
-| **AutoGen** | `ConversableAgent(`<br>`AssistantAgent(`<br>`UserProxyAgent(`<br>`GroupChat(` |
+| **Browser-use** | `Agent(` *(confirmed via `from browser_use import Agent`, same import-confirmation mechanism as every other bare "Agent(" row)* |
+| **LangChain** | `create_agent(`<br>`create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
+| **LangGraph** | `StateGraph(`<br>`MessageGraph(`<br>`.add_node(`<br>`.compile(`<br>`create_react_agent(` |
+| **CrewAI** | `Agent(`<br>`@agent`<br>`@crew`<br>`Process.sequential`<br>`Process.hierarchical` |
+| **AutoGen** | `ConversableAgent(`<br>`AssistantAgent(`<br>`UserProxyAgent(` |
 | **LlamaIndex** | `ReActAgent(`<br>`OpenAIAgent(`<br>`FunctionCallingAgentWorker(`<br>`AgentRunner(`<br>`Workflow(`<br>`@step`<br>`StartEvent`<br>`StopEvent` |
 | **Pydantic AI** | `pydantic_ai.Agent`<br>`from pydantic_ai import Agent`<br>`@agent.tool`<br>`@agent.tool_plain` |
 | **Smolagents** | `ToolCallingAgent(`<br>`CodeAgent(`<br>`ManagedAgent(` |
 | **Haystack** | `from haystack import Agent`<br>`Agent(`<br>`Pipeline(` |
 | **OpenAI Agents SDK** | `from openai import Agent`<br>`from agents import Agent`<br>`openai.agents` |
 | **Bee Agent Framework** | `from beeai_framework.agents.react import ReActAgent`<br>`from beeai_framework.agents.requirement import RequirementAgent`<br>`ReActAgent(`<br>`RequirementAgent(`<br>*(package was renamed from `bee_agent_framework` to `beeai_framework`; match both import roots)* |
+| **Deep Agents** | `create_deep_agent(`<br>`from deepagents import create_deep_agent` *(the Python deepagents package -- same framework as JS's "Deep Agents JS" row below, canonicalized to one name via pattern_index.py's ALIASES, same as LangChain/LangChain.js)* |
+| **Google ADK** | `Agent(`<br>`LlmAgent(`<br>`from google.adk` *(Google's Agent Development Kit -- resolved via a google.adk submodule override in pattern_detector.py, so it's never misread as Google GenAI just because both import under plain google)* |
 
 ---
 
@@ -111,6 +114,12 @@ from smolagents import ToolCallingAgent, CodeAgent, ManagedAgent
 # Bee Agent Framework
 from beeai_framework.agents.react import ReActAgent
 from beeai_framework.agents.requirement import RequirementAgent
+
+# Deep Agents
+from deepagents import create_deep_agent
+
+# Google ADK
+from google.adk.agents import Agent, LlmAgent
 ```
 
 ### Notes on scope

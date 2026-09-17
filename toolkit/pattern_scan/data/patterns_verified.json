@@ -17,7 +17,6 @@
         "AutoGen": [
           "AssistantAgent(",
           "ConversableAgent(",
-          "GroupChat(",
           "UserProxyAgent("
         ],
         "Bee Agent Framework": [
@@ -32,6 +31,10 @@
           "new ReActAgent(",
           "new RequirementAgent("
         ],
+        "Browser-use": [
+          "Agent(",
+          "from browser_use import Agent"
+        ],
         "CopilotKit": [
           "<CopilotKit",
           "@copilotkit/react-core",
@@ -41,22 +44,28 @@
           "@agent",
           "@crew",
           "Agent(",
-          "Crew(",
           "Process.hierarchical",
           "Process.sequential"
         ],
-        "Deep Agents JS": [
+        "Deep Agents": [
           "\\bCreateDeepAgentParams\\b",
           "\\bDeepAgent\\b",
           "createDeepAgent(",
+          "create_deep_agent(",
           "from \"deepagents\"",
-          "from 'deepagents'"
+          "from 'deepagents'",
+          "from deepagents import create_deep_agent"
         ],
         "ElizaOS": [
           "@elizaos/core",
           "ElizaAgent(",
           "createEliza(",
           "new AgentRuntime("
+        ],
+        "Google ADK": [
+          "Agent(",
+          "LlmAgent(",
+          "from google.adk"
         ],
         "Haystack": [
           "Agent(",
@@ -68,6 +77,7 @@
           "createOpenAIToolsAgent(",
           "createReactAgent(",
           "createToolCallingAgent(",
+          "create_agent(",
           "create_json_agent(",
           "create_openai_tools_agent(",
           "create_react_agent(",
@@ -80,9 +90,7 @@
           ".addNode(",
           ".add_node(",
           ".compile(",
-          "MemorySaver(",
           "MessageGraph(",
-          "SqliteSaver(",
           "StateGraph(",
           "create_react_agent(",
           "new StateGraph("
@@ -148,17 +156,24 @@
           "javascript",
           "python"
         ],
+        "Browser-use": [
+          "python"
+        ],
         "CopilotKit": [
           "javascript"
         ],
         "CrewAI": [
           "python"
         ],
-        "Deep Agents JS": [
-          "javascript"
+        "Deep Agents": [
+          "javascript",
+          "python"
         ],
         "ElizaOS": [
           "javascript"
+        ],
+        "Google ADK": [
+          "python"
         ],
         "Haystack": [
           "python"
@@ -211,7 +226,7 @@
         "CrewAI": [
           ".kickoff("
         ],
-        "Deep Agents JS": [
+        "Deep Agents": [
           ".invoke(",
           ".stream("
         ],
@@ -309,7 +324,7 @@
         "CrewAI": [
           "python"
         ],
-        "Deep Agents JS": [
+        "Deep Agents": [
           "javascript"
         ],
         "ElizaOS": [
@@ -761,7 +776,7 @@
           "manager_agent=",
           "manager_llm="
         ],
-        "Deep Agents JS": [
+        "Deep Agents": [
           "@langchain/langgraph"
         ],
         "ElizaOS": [
@@ -830,7 +845,7 @@
         "CrewAI": [
           "python"
         ],
-        "Deep Agents JS": [
+        "Deep Agents": [
           "javascript"
         ],
         "ElizaOS": [

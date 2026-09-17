@@ -9,7 +9,8 @@ _DEFAULT_OUT_PATH = _PACKAGE_DIR / "data" / "patterns_verified.json"
 MASTER_FRAMEWORKS = [
     "LangChain", "LangGraph", "LlamaIndex", "CrewAI", "AutoGen", "Mastra",
     "Vercel AI SDK", "ElizaOS", "Bee Agent Framework", "Smolagents",
-    "Pydantic AI", "Agno", "Haystack", "OpenAI Agents SDK", "Deep Agents JS",
+    "Pydantic AI", "Agno", "Haystack", "OpenAI Agents SDK", "Deep Agents",
+    "Google ADK",
     "OpenAI SDK", "Anthropic SDK", "Google GenAI", "Together SDK",
     "Instructor", "js-agent", "CopilotKit",
     "Mem0", "Chroma", "Weaviate", "Qdrant", "Pinecone", "Zep", "PGVector", "Milvus",
@@ -19,6 +20,7 @@ MASTER_FRAMEWORKS = [
 MASTER_SET = set(MASTER_FRAMEWORKS)
 
 ALIASES = {
+    "Deep Agents JS": "Deep Agents",
     "LangChain.js": "LangChain", "LangChain JS": "LangChain",
     "LangChain JS RAG": "LangChain", "LangChain RAG": "LangChain",
     "LangGraph.js": "LangGraph", "LangGraph JS": "LangGraph",

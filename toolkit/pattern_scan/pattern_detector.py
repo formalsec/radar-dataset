@@ -54,6 +54,7 @@ MODULE_TO_FRAMEWORK = {
     "smolagents": "Smolagents",
     "agents": "OpenAI Agents SDK",
     "beeai_framework": "Bee Agent Framework", "bee_agent_framework": "Bee Agent Framework",
+    "deepagents": "Deep Agents",
     "chromadb": "Chroma",
     "qdrant_client": "Qdrant",
     "pinecone": "Pinecone",
@@ -64,7 +65,7 @@ MODULE_TO_FRAMEWORK = {
     "zep_python": "Zep", "zep_cloud": "Zep",
     "openai": "OpenAI SDK",
     "anthropic": "Anthropic SDK",
-    "google": "Google GenAI",  # covers google.genai / google.generativeai
+    "google": "Google GenAI",  # covers google.genai / google.generativeai -- see MODULE_SUBPATH_TO_FRAMEWORK for google.adk
     "together": "Together SDK",
     "instructor": "Instructor",
     "playwright": "Playwright",
@@ -76,6 +77,46 @@ MODULE_TO_FRAMEWORK = {
     "a2a": "A2A SDK", "a2a_sdk": "A2A SDK",
     # TODO: extend as real repos surface more import styles not covered here.
 }
+
+# Submodule-level overrides, checked BEFORE MODULE_TO_FRAMEWORK's single
+# top-level-segment lookup -- needed when a specific submodule belongs to a
+# DIFFERENT framework than its top-level package's default mapping (e.g.
+# `google.adk` is Google's Agent Development Kit, not Google GenAI, even
+# though both import under plain `google`).
+MODULE_SUBPATH_TO_FRAMEWORK = {
+    "google.adk": "Google ADK",
+}
+
+
+def _resolve_module_framework(canonical):
+    """
+    `canonical` is the FULL dotted import path (e.g.
+    "google.adk.agents.Agent", "browser_use", "langchain_classic.agents"),
+    not just its first segment -- needed so a submodule can be resolved
+    differently from its top-level package (see MODULE_SUBPATH_TO_FRAMEWORK).
+
+    Falls back to MODULE_TO_FRAMEWORK.get(module_root), plus a prefix rule
+    for LangChain's own package split: separate PyPI/import roots per
+    integration (langchain_openai, langchain_anthropic, langchain_mistralai,
+    langchain_classic, langchain_community, ...) that all still ship as
+    part of the LangChain framework. Confirmed a real gap by testing: `from
+    langchain_classic.agents import AgentExecutor, create_tool_calling_agent`
+    left both calls completely unconfirmed, because only bare "langchain"
+    was ever mapped. A prefix rule (vs. hardcoding each package name) covers
+    future langchain_* splits the same way.
+    """
+    parts = canonical.split(".")
+    if len(parts) > 1:
+        subpath_fw = MODULE_SUBPATH_TO_FRAMEWORK.get(f"{parts[0]}.{parts[1]}")
+        if subpath_fw is not None:
+            return subpath_fw
+    module_root = parts[0]
+    fw = MODULE_TO_FRAMEWORK.get(module_root)
+    if fw is not None:
+        return fw
+    if module_root.startswith("langchain_"):
+        return "LangChain"
+    return None
 
 
 def _build_import_aliases(tree):
@@ -644,6 +685,22 @@ def _extract_simple_target_name(targets):
     return _resolve_identity(targets[0])
 
 
+def _wrapping_call_framework(call_node, var_name, prelim_framework_by_var):
+    """True when `call_node` is a method call (`X.method(...)`) on a
+    receiver that's ALREADY a known creation of the SAME kind in this file
+    -- e.g. `app = workflow.compile()` after `workflow = StateGraph(...)`
+    is the same agent finalized, not a second one. Returns the receiver's
+    framework, or None. A bare-name creation call is never an Attribute
+    call and is untouched by this check."""
+    func = call_node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    receiver = _resolve_identity(func)
+    if receiver is None or receiver == var_name:
+        return None
+    return prelim_framework_by_var.get(receiver)
+
+
 def _extract_tools_bound(call_node):
     """`Agent(tools=[search_tool, calc_tool])` -> ["search_tool", "calc_tool"].
     Attribution-gated tool counting: a tool only counts if it actually shows
@@ -652,6 +709,16 @@ def _extract_tools_bound(call_node):
         if kw.arg == "tools" and isinstance(kw.value, (ast.List, ast.Tuple)):
             return [elt.id for elt in kw.value.elts if isinstance(elt, ast.Name)]
     return []
+
+
+def _extract_bind_tools_names(call_node):
+    """`model.bind_tools([search_tool, calc_tool])` -> ["search_tool", "calc_tool"].
+    Same shape as _extract_tools_bound, but bind_tools takes tools as the
+    first positional argument, not a tools= keyword."""
+    if not call_node.args or not isinstance(call_node.args[0], (ast.List, ast.Tuple)):
+        return None
+    names = [elt.id for elt in call_node.args[0].elts if isinstance(elt, ast.Name)]
+    return names or None
 
 
 def _extract_store_link(call_node, known_store_vars):
@@ -752,14 +819,20 @@ def _resolve_variable_aliases(tree, *framework_dicts):
     while changed:
         changed = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
+            # Same shape for `x = y` and an annotated `x: T = y`; only the
+            # target/value accessors differ.
+            if isinstance(node, ast.Assign):
+                if len(node.targets) != 1:
+                    continue
+                target_node, value_node = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign):
+                target_node, value_node = node.target, node.value
+            else:
                 continue
-            if not isinstance(node.value, ast.Name):
+            if not isinstance(value_node, ast.Name) or not isinstance(target_node, ast.Name):
                 continue
-            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
-                continue
-            target = node.targets[0].id
-            source_var = node.value.id
+            target = target_node.id
+            source_var = value_node.id
             for d in framework_dicts:
                 if source_var in d and target not in d:
                     d[target] = d[source_var]
@@ -792,14 +865,12 @@ def _frameworks_for_call_identifier(func_node, import_aliases):
         canonical = import_aliases.get(func_node.id)
         if canonical is None:
             return set()
-        module_root = canonical.split(".")[0]
     elif isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name):
         base = func_node.value.id
-        canonical = import_aliases.get(base)
-        module_root = canonical.split(".")[0] if canonical else base
+        canonical = import_aliases.get(base) or base
     else:
         return set()
-    fw = MODULE_TO_FRAMEWORK.get(module_root)
+    fw = _resolve_module_framework(canonical)
     return {fw} if fw else set()
 
 
@@ -1209,9 +1280,9 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as e:
-        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], [], []
+        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], []
     except RecursionError as e:
-        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], [], []
+        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], []
 
     source_lines = source.splitlines()
     import_aliases = _build_import_aliases(tree)
@@ -1346,17 +1417,38 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 if isinstance(node.value, ast.Call):
                     assign_target_for_call[id(node.value)] = var_name
                 assigns_by_func_and_name[(func_ctx, var_name)] = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            # `x: T = expr` -- same as a plain Assign, just a single
+            # `.target` instead of a `.targets` list.
+            var_name = _resolve_identity(node.target)
+            if var_name is not None:
+                if isinstance(node.value, ast.Call):
+                    assign_target_for_call[id(node.value)] = var_name
+                assigns_by_func_and_name[(func_ctx, var_name)] = node.value
 
     # Resolve agent/store variable names from their assignment (fallback to
     # the assigned variable name when there's no name=/role=/id= kwarg).
     named_agents = []
     agent_var_by_call_id = {}
     agent_framework_by_var = {}  # populated below, used by call_sites/write/read attribution
+    # Preliminary view (before wrap-filtering) so a wrapping call can look
+    # up which framework its receiver already resolved to.
+    prelim_agent_framework = {
+        assign_target_for_call[cid]: e["framework"]
+        for cid, e in pending_agent_calls.items() if assign_target_for_call.get(cid)
+    }
     for call_id, entry in pending_agent_calls.items():
         var_name = assign_target_for_call.get(call_id)
         if entry["name"] is None:
             entry["name"] = var_name
         agent_var_by_call_id[call_id] = var_name
+        wrapped_framework = _wrapping_call_framework(entry["call_node"], var_name, prelim_agent_framework)
+        if wrapped_framework is not None:
+            if var_name:
+                agent_framework_by_var[var_name] = wrapped_framework
+            continue  # same agent as the receiver -- don't count a second one
+        if var_name:
+            agent_framework_by_var[var_name] = entry["framework"]
         named_agents.append({
             "name": entry["name"], "framework": entry["framework"],
             "line": entry["line"], "tools_bound": entry["tools_bound"],
@@ -1370,27 +1462,32 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # Confirmed by testing.
             "variable": var_name,
         })
-    agent_framework_by_var.update({
-        var_name: entry["framework"]
-        for call_id, entry in pending_agent_calls.items()
-        for var_name in [agent_var_by_call_id[call_id]] if var_name
-    })
 
     named_stores = []
     store_var_by_call_id = {}
-    for call_id, entry in pending_store_calls.items():
-        var_name = assign_target_for_call.get(call_id)
-        store_var_by_call_id[call_id] = var_name
-        named_stores.append({
-            "variable": var_name, "framework": entry["framework"], "line": entry["line"],
-            "matched_call": entry["matched_call"],
-        })
-    known_store_vars = {s["variable"] for s in named_stores if s["variable"]}
     # variable -> single resolved framework, used to deduplicate write/read
     # counting below (was previously counted independently per framework
     # whenever a shared verb like ".add(" matched, regardless of which
     # actual store the call was on).
-    store_framework_by_var = {s["variable"]: s["framework"] for s in named_stores if s["variable"]}
+    store_framework_by_var = {}
+    prelim_store_framework = {
+        assign_target_for_call[cid]: e["framework"]
+        for cid, e in pending_store_calls.items() if assign_target_for_call.get(cid)
+    }
+    for call_id, entry in pending_store_calls.items():
+        var_name = assign_target_for_call.get(call_id)
+        store_var_by_call_id[call_id] = var_name
+        wrapped_framework = _wrapping_call_framework(entry["call_node"], var_name, prelim_store_framework)
+        if wrapped_framework is not None:
+            if var_name:
+                store_framework_by_var[var_name] = wrapped_framework
+            continue  # same store as the receiver -- don't count a second one
+        if var_name:
+            store_framework_by_var[var_name] = entry["framework"]
+        named_stores.append({
+            "variable": var_name, "framework": entry["framework"], "line": entry["line"],
+            "matched_call": entry["matched_call"],
+        })
 
     # CROSS-FILE resolution: a store OR agent created in another file and
     # imported here (`from store import kb`, `from agents import researcher`)
@@ -1420,6 +1517,10 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     ident = _resolve_identity(t)
                     if ident:
                         locally_reassigned.add(ident)
+            elif isinstance(node, ast.AnnAssign):
+                ident = _resolve_identity(node.target)
+                if ident:
+                    locally_reassigned.add(ident)
 
         for kind, table in (("stores", store_framework_by_var), ("agents", agent_framework_by_var)):
             exports_for_kind = external_exports.get(kind) or {}
@@ -1528,6 +1629,18 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     for node, func_ctx in _walk_with_function_context(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
+        if node.func.attr in ("bind_tools", "bindTools"):
+            # AST-based counterpart to _detect_bind_tools_calls' line regex
+            # (JS/TS only) -- can actually look at the call's arguments.
+            try:
+                matched_call = f"{ast.unparse(node.func)}("
+            except Exception:
+                matched_call = f".{node.func.attr}("
+            llm_tool_calls.append({
+                "line": node.lineno, "variable": _resolve_identity(node.func), "framework": "LangChain",
+                "matched_call": matched_call, "tool_names": _extract_bind_tools_names(node),
+            })
+            continue
         if node.func.attr not in LLM_TOOL_CALL_METHODS:
             continue
         base_var = _resolve_identity(node.func)
@@ -1549,8 +1662,6 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             "matched_call": matched_call,
             "tool_names": tool_names,  # None means confirmed-but-not-extractable, see docstring above
         })
-
-    llm_tool_calls.extend(_detect_bind_tools_calls(source_lines))
 
     tool_use_markers = _detect_tool_use_markers(source_lines)
     agent_markers = _detect_agent_markers(source_lines)
@@ -1601,8 +1712,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     all_imports = []
     has_tracked_framework = False
     for local_name, canonical in sorted(import_aliases.items()):
-        module_root = canonical.split(".")[0]
-        framework = MODULE_TO_FRAMEWORK.get(module_root)
+        framework = _resolve_module_framework(canonical)
         if framework:
             has_tracked_framework = True
         all_imports.append({
