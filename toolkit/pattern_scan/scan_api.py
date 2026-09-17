@@ -33,7 +33,7 @@ import tarfile
 import time
 from pathlib import Path
 
-from github_fetcher import GitHubClient, GITHUB_API, _parse_owner_repo
+from ..github_fetcher import GitHubClient, GITHUB_API, _parse_owner_repo
 from .incremental_json import IncrementalJSONArrayWriter, already_processed_keys
 from .pattern_detector import PatternDetector, EXTENSION_LANGUAGE_MAP, apply_framework_confirmation
 from .util import RunMetadata, timestamped_results_path, utc_now_iso

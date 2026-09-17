@@ -1,0 +1,54 @@
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Local environments and secrets
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Generated crawler outputs
+crawler/results_*/
+crawler/seen_repos.json
+crawler/classifications_*.json
+crawler/classifications_*.json.backup*
+crawler/*_backup.json
+
+# Generated scanner outputs and downloaded repositories
+toolkit/pattern_scan/results/
+toolkit/pattern_scan/repos/
+toolkit/pattern_scan/downloads/
+
+# Generated manifests and temporary data
+*.meta.json
+*.jsonl.tmp
+*.tmp
+*.temp
+*.bak
+*.backup
+*.backup.old
+
+# Logs and local run artifacts
+*.log
+.cache/
+dist/
+build/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
