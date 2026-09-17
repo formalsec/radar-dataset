@@ -87,7 +87,7 @@ class Frameworks:
         },
         "Deep Agents JS": {
             "keywords": ["deep-agents", "@langchain/deep-agents", "deepagents"],
-            "dependencies": ["@langchain/deep-agents", "deep-agents"],
+            "dependencies": ["deepagents", "@langchain/deep-agents", "deep-agents"],
             "category": "agent_orchestration"
         },
         

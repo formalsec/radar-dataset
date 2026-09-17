@@ -43,10 +43,10 @@ removed from this file — add them to Table II first if they should be tracked.
 | **Mastra** | `new Mastra(`<br>`createAgent(`<br>`@mastra/core`<br>`new Agent<`<br>`MastraAgent` |
 | **Vercel AI SDK** | `generateText(`<br>`streamText(`<br>`from 'ai'`<br>`from '@ai-sdk/` |
 | **ElizaOS** | `createEliza(`<br>`ElizaAgent(`<br>`new AgentRuntime(`<br>`@elizaos/core` |
-| **Deep Agents JS** | `deepAgents(`<br>`@langchain/deep-agents`<br>`DeepAgent`<br>`DeepAgentConfig` |
+| **Deep Agents JS** | `createDeepAgent(`<br>`from "deepagents"`<br>`from 'deepagents'`<br>`\bDeepAgent\b`<br>`\bCreateDeepAgentParams\b` |
 | **Bee Agent Framework** | `new ReActAgent(`<br>`new RequirementAgent(`<br>`@i-am-bee/beeai-framework`<br>`from 'beeai-framework'` |
 | **CopilotKit** | `useCopilotAction(`<br>`<CopilotKit`<br>`@copilotkit/react-core` |
-| **MCP SDK** | `new McpServer(`<br>`@modelcontextprotocol/sdk`<br>`Server(` from the MCP SDK namespace *(disambiguate from a bare "MCP" substring, which is deliberately NOT a pattern here — see Protocols note below)* |
+| **MCP SDK** | `new McpServer(`<br>`new Server(`<br>`@modelcontextprotocol/sdk` *(bare Server( is excluded — it's a substring of any unrelated createServer(/fooServer( call, confirmed a real false-positive source by testing; a bare "MCP" substring is excluded for the same reason — see Protocols note below)* |
 
 ---
 
@@ -115,9 +115,11 @@ from beeai_framework.agents.requirement import RequirementAgent
 
 ### Notes on scope
 - **MCP SDK** appears here only when it is used to *construct* an agent-serving process
-  (`McpServer(`, `Server(`); a bare `MCP` or `mcptool` token is too generic for creation
+  (`new McpServer(`, `new Server(`); a bare `MCP` or `mcptool` token is too generic for creation
   detection and belongs instead under the Protocols-specific handoff/call signals, gated
-  by confirmation logic (see Agent Handoffs doc).
+  by confirmation logic (see Agent Handoffs doc). It's tracked here for
+  `framework_comparison`, but excluded from `n_agents` in pattern_detector.py --
+  it creates a tool-exposing server, not an LLM agent.
 - LLM SDKs without an "Agent" abstraction (OpenAI SDK, Anthropic SDK, Google GenAI,
   Together SDK, Instructor, js-agent) are intentionally excluded from this file — they
   provide model calls, not agent constructors. Their usage is picked up separately by
@@ -129,3 +131,13 @@ from beeai_framework.agents.requirement import RequirementAgent
   agent constructors call it internally, hidden inside the library, so seeing it in
   app code means that constructor was skipped. Counted as custom-agent evidence
   (`n_custom_agents`) in pattern_detector.py, not via this table.
+
+## Verification
+
+`patterns_verified.json` is generated from these tables; generation does not
+verify API names. Deep Agents JS references checked on 2026-09-17:
+[creation function](https://reference.langchain.com/javascript/deepagents/browser/createDeepAgent),
+[types](https://reference.langchain.com/javascript/deepagents/types).
+`DeepAgent`, `CreateDeepAgentParams`, and imports indicate usage; only the
+`createDeepAgent(...)` call counts as a creation. `DeepAgentConfig` remains
+unverified. Regression examples are in `pattern_scan/test_counts.py`.

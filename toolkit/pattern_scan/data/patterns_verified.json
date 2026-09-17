@@ -46,10 +46,11 @@
           "Process.sequential"
         ],
         "Deep Agents JS": [
-          "@langchain/deep-agents",
-          "DeepAgent",
-          "DeepAgentConfig",
-          "deepAgents("
+          "\\bCreateDeepAgentParams\\b",
+          "\\bDeepAgent\\b",
+          "createDeepAgent(",
+          "from \"deepagents\"",
+          "from 'deepagents'"
         ],
         "ElizaOS": [
           "@elizaos/core",
@@ -98,8 +99,8 @@
         ],
         "MCP SDK": [
           "@modelcontextprotocol/sdk",
-          "Server(",
-          "new McpServer("
+          "new McpServer(",
+          "new Server("
         ],
         "Mastra": [
           "@mastra/core",
@@ -134,6 +135,62 @@
       "generic": {
         "Graph Compile": [
           "\\.compile\\s*\\("
+        ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "AutoGen": [
+          "python"
+        ],
+        "Bee Agent Framework": [
+          "javascript",
+          "python"
+        ],
+        "CopilotKit": [
+          "javascript"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Deep Agents JS": [
+          "javascript"
+        ],
+        "ElizaOS": [
+          "javascript"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LangGraph": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "MCP SDK": [
+          "javascript"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Pydantic AI": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
+        ],
+        "Vercel AI SDK": [
+          "javascript"
         ]
       }
     },
@@ -237,6 +294,56 @@
           "POST /api/agents/[^/]+/invoke",
           "X-Agent-ID"
         ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "AutoGen": [
+          "python"
+        ],
+        "Bee Agent Framework": [
+          "javascript",
+          "python"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Deep Agents JS": [
+          "javascript"
+        ],
+        "ElizaOS": [
+          "javascript"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LangGraph": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Pydantic AI": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
+        ],
+        "Vercel AI SDK": [
+          "javascript"
+        ]
       }
     },
     "rag_creation": {
@@ -308,6 +415,39 @@
         ],
         "Zep JS": [
           "new ZepClient("
+        ]
+      },
+      "framework_languages": {
+        "Chroma": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mem0": [
+          "python"
+        ],
+        "Milvus": [
+          "python"
+        ],
+        "PGVector": [
+          "python"
+        ],
+        "Pinecone": [
+          "javascript",
+          "python"
+        ],
+        "Qdrant": [
+          "javascript",
+          "python"
+        ],
+        "Weaviate": [
+          "javascript",
+          "python"
+        ],
+        "Zep": [
+          "python"
         ]
       }
     },
@@ -405,6 +545,49 @@
           "POST /api/memories",
           "POST /api/memories/",
           "X-Agent-ID"
+        ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "Chroma": [
+          "javascript",
+          "python"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mem0": [
+          "python"
+        ],
+        "Milvus": [
+          "python"
+        ],
+        "PGVector": [
+          "python"
+        ],
+        "Pinecone": [
+          "javascript",
+          "python"
+        ],
+        "Qdrant": [
+          "javascript",
+          "python"
+        ],
+        "Weaviate": [
+          "javascript",
+          "python"
+        ],
+        "Zep": [
+          "python"
         ]
       }
     },
@@ -506,6 +689,49 @@
           "POST /api/search",
           "X-Agent-ID"
         ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "Chroma": [
+          "javascript",
+          "python"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mem0": [
+          "python"
+        ],
+        "Milvus": [
+          "python"
+        ],
+        "PGVector": [
+          "python"
+        ],
+        "Pinecone": [
+          "javascript",
+          "python"
+        ],
+        "Qdrant": [
+          "javascript",
+          "python"
+        ],
+        "Weaviate": [
+          "javascript",
+          "python"
+        ],
+        "Zep": [
+          "python"
+        ]
       }
     },
     "a2a_interaction": {
@@ -589,6 +815,42 @@
         ],
         "Tool Agent Invoke": [
           "tool\\.invoke_agent"
+        ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "AutoGen": [
+          "python"
+        ],
+        "Bee Agent Framework": [
+          "python"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Deep Agents JS": [
+          "javascript"
+        ],
+        "ElizaOS": [
+          "javascript"
+        ],
+        "LangGraph": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
         ]
       }
     }
