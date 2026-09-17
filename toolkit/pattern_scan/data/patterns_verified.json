@@ -84,6 +84,7 @@
           "create_structured_chat_agent(",
           "create_tool_calling_agent(",
           "from langchain.agents import AgentExecutor",
+          "initialize_agent(",
           "new AgentExecutor("
         ],
         "LangGraph": [

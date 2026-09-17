@@ -22,7 +22,7 @@ removed from this file — add them to Table II first if they should be tracked.
 |-----------|-------------------|
 | **Agno** | `from agno.agent import Agent`<br>`agno\.Agent`<br>`Agent(`<br>`Team(`<br>`Workflow(`<br>`@agent`<br>`@crew`<br>`@tool`<br>`.run(`<br>`.arun(` |
 | **Browser-use** | `Agent(` *(confirmed via `from browser_use import Agent`, same import-confirmation mechanism as every other bare "Agent(" row)* |
-| **LangChain** | `create_agent(`<br>`create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
+| **LangChain** | `create_agent(`<br>`create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`initialize_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
 | **LangGraph** | `StateGraph(`<br>`MessageGraph(`<br>`.add_node(`<br>`.compile(`<br>`create_react_agent(` |
 | **CrewAI** | `Agent(`<br>`@agent`<br>`@crew`<br>`Process.sequential`<br>`Process.hierarchical` |
 | **AutoGen** | `ConversableAgent(`<br>`AssistantAgent(`<br>`UserProxyAgent(` |
