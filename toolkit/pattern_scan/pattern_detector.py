@@ -535,6 +535,13 @@ def _resolve_expr_text(node):
         return ""
 
 
+def _unwrap_subscript_callee(func_node):
+    """Return the constructor behind a parameterized generic."""
+    if isinstance(func_node, ast.Subscript):
+        return func_node.value
+    return func_node
+
+
 def _match_constructor_text(call_or_base_text, category, imported_frameworks=None, require_confirmation=True):
     """
     Two different uses need two different strictness levels here:
@@ -1337,8 +1344,9 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             for alias in node.names:
                 lines.append(f"from {module} import {alias.name}")
         elif isinstance(node, ast.Call):
+            callee = _unwrap_subscript_callee(node.func)
             try:
-                func_repr = ast.unparse(node.func)
+                func_repr = ast.unparse(callee)
             except Exception:
                 continue
             call_text = f"{func_repr}("
@@ -1366,21 +1374,21 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # separately defining its own unrelated local `class Workflow`,
             # previously had that unrelated Workflow() wrongly confirmed as
             # Agno purely because Agno appeared elsewhere in the file.
-            call_frameworks = _frameworks_for_call_identifier(node.func, import_aliases)
+            call_frameworks = _frameworks_for_call_identifier(callee, import_aliases)
             # Canonical (fully-qualified) form of this call, via the file's
             # own imports -- lets a locally-renamed import still match a
             # registry pattern written in qualified form. See
             # _canonical_call_text.
-            canonical_text = _canonical_call_text(node.func, import_aliases)
+            canonical_text = _canonical_call_text(callee, import_aliases)
             framework = None
             if agent_creation_category is not None:
                 framework = _match_constructor_text(call_text, agent_creation_category, call_frameworks)
                 if framework is None and canonical_text:
                     framework = _match_constructor_text(canonical_text, agent_creation_category, call_frameworks)
-                if framework is not None and _is_non_agent_compile_call(node.func, import_aliases):
+                if framework is not None and _is_non_agent_compile_call(callee, import_aliases):
                     framework = None
-            if framework is None and isinstance(node.func, ast.Name):
-                framework = extra_agent_classes.get(node.func.id)
+            if framework is None and isinstance(callee, ast.Name):
+                framework = extra_agent_classes.get(callee.id)
             if framework is not None:
                 pending_agent_calls[id(node)] = {
                     "framework": framework,
@@ -1398,8 +1406,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 store_framework = _match_constructor_text(call_text, rag_creation_category, call_frameworks)
                 if store_framework is None and canonical_text:
                     store_framework = _match_constructor_text(canonical_text, rag_creation_category, call_frameworks)
-            if store_framework is None and isinstance(node.func, ast.Name):
-                store_framework = extra_store_classes.get(node.func.id)
+            if store_framework is None and isinstance(callee, ast.Name):
+                store_framework = extra_store_classes.get(callee.id)
             if store_framework is not None:
                 pending_store_calls[id(node)] = {
                     "framework": store_framework,
@@ -1414,8 +1422,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # genuine tool-calling evidence rather than a guess. Same
             # per-identifier import confirmation as everything else here.
             llm_client_name = (
-                node.func.id if isinstance(node.func, ast.Name)
-                else node.func.attr if isinstance(node.func, ast.Attribute)
+                callee.id if isinstance(callee, ast.Name)
+                else callee.attr if isinstance(callee, ast.Attribute)
                 else None
             )
             if llm_client_name in LLM_CLIENT_CONSTRUCTORS and LLM_CLIENT_CONSTRUCTORS[llm_client_name] in call_frameworks:
