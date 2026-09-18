@@ -542,6 +542,14 @@ def _unwrap_subscript_callee(func_node):
     return func_node
 
 
+def _callee_simple_name(func_node):
+    if isinstance(func_node, ast.Name):
+        return func_node.id
+    if isinstance(func_node, ast.Attribute):
+        return func_node.attr
+    return None
+
+
 def _match_constructor_text(call_or_base_text, category, imported_frameworks=None, require_confirmation=True):
     """
     Two different uses need two different strictness levels here:
@@ -725,22 +733,53 @@ def _tool_element_identifier(elt):
     return None
 
 
-def _extract_tools_bound(call_node, assigns_by_func_and_name=None, func_ctx=None):
-    """`Agent(tools=[search_tool, calc_tool])` -> ["search_tool", "calc_tool"].
-    Also resolves one-hop variable indirection (`tools = [...]` assigned
-    earlier in the same function, then passed as `tools=tools`) -- confirmed
-    a real, common gap by testing: without it, the dominant "build the list
-    once, pass the variable" shape produced zero tools_bound. Attribution-
-    gated tool counting: a tool only counts if it actually shows up here,
-    not just anywhere in the repo."""
+def _dict_value_for_key(dict_node, key):
+    """Look up a string key in a literal dictionary."""
+    if not isinstance(dict_node, ast.Dict):
+        return None
+    for k, v in zip(dict_node.keys, dict_node.values):
+        if isinstance(k, ast.Constant) and k.value == key:
+            return v
+    return None
+
+
+_POSITIONAL_TOOLS_ARG_INDEX = {
+    "create_react_agent": 1, "create_openai_tools_agent": 1,
+    "create_tool_calling_agent": 1, "create_structured_chat_agent": 1,
+    "initialize_agent": 0,
+}
+
+
+def _resolve_tools_value(value, assigns_by_func_and_name, func_ctx):
+    """Resolve a local tool list or tuple through one assignment."""
+    if isinstance(value, ast.Name) and assigns_by_func_and_name is not None:
+        value = assigns_by_func_and_name.get((func_ctx, value.id), value)
+    if isinstance(value, (ast.List, ast.Tuple)):
+        return [name for name in (_tool_element_identifier(e) for e in value.elts) if name]
+    return None
+
+
+def _extract_tools_bound(call_node, assigns_by_func_and_name=None, func_ctx=None, callee_name=None):
+    """Extract tools from keywords, literal kwargs, or known positional arguments."""
     for kw in call_node.keywords:
-        if kw.arg != "tools":
-            continue
-        value = kw.value
-        if isinstance(value, ast.Name) and assigns_by_func_and_name is not None:
-            value = assigns_by_func_and_name.get((func_ctx, value.id), value)
-        if isinstance(value, (ast.List, ast.Tuple)):
-            return [name for name in (_tool_element_identifier(e) for e in value.elts) if name]
+        if kw.arg == "tools":
+            names = _resolve_tools_value(kw.value, assigns_by_func_and_name, func_ctx)
+            if names is not None:
+                return names
+        elif kw.arg is None:
+            source = kw.value
+            if isinstance(source, ast.Name) and assigns_by_func_and_name is not None:
+                source = assigns_by_func_and_name.get((func_ctx, source.id))
+            names = _resolve_tools_value(_dict_value_for_key(source, "tools"),
+                                          assigns_by_func_and_name, func_ctx)
+            if names is not None:
+                return names
+
+    idx = _POSITIONAL_TOOLS_ARG_INDEX.get(callee_name)
+    if idx is not None and len(call_node.args) > idx:
+        names = _resolve_tools_value(call_node.args[idx], assigns_by_func_and_name, func_ctx)
+        if names is not None:
+            return names
     return []
 
 
@@ -806,11 +845,9 @@ def _find_starred_tools_value(call_node, assigns_by_func_and_name, func_ctx):
         if kw.arg is not None or not isinstance(kw.value, ast.Name):
             continue
         source = assigns_by_func_and_name.get((func_ctx, kw.value.id))
-        if not isinstance(source, ast.Dict):
-            continue
-        for k, v in zip(source.keys, source.values):
-            if isinstance(k, ast.Constant) and k.value == "tools":
-                return v
+        value = _dict_value_for_key(source, "tools")
+        if value is not None:
+            return value
     return None
 
 
@@ -1394,7 +1431,9 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     "framework": framework,
                     "name": _extract_name_kwarg(node),
                     "line": node.lineno,
-                    "tools_bound": _extract_tools_bound(node, assigns_by_func_and_name, func_ctx),
+                    "tools_bound": _extract_tools_bound(
+                        node, assigns_by_func_and_name, func_ctx, callee_name=_callee_simple_name(callee),
+                    ),
                     "call_node": node,
                     "matched_call": call_text,  # e.g. "SolidAssistantAgent(" -- so you can eyeball-confirm the match
                 }
@@ -1421,11 +1460,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # `.chat.completions.create(tools=...)` on it can be trusted as
             # genuine tool-calling evidence rather than a guess. Same
             # per-identifier import confirmation as everything else here.
-            llm_client_name = (
-                callee.id if isinstance(callee, ast.Name)
-                else callee.attr if isinstance(callee, ast.Attribute)
-                else None
-            )
+            llm_client_name = _callee_simple_name(callee)
             if llm_client_name in LLM_CLIENT_CONSTRUCTORS and LLM_CLIENT_CONSTRUCTORS[llm_client_name] in call_frameworks:
                 pending_llm_clients[id(node)] = {
                     "framework": LLM_CLIENT_CONSTRUCTORS[llm_client_name],
