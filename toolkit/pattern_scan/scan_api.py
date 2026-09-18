@@ -47,6 +47,8 @@ EXCLUDED_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
     "dist", "build", ".next", ".turbo", "site-packages", ".mypy_cache",
     ".pytest_cache", "coverage", ".tox", "vendor", "test", "tests", "evals",
+    "examples", "example", "demo", "demos", "tutorial", "tutorials",
+    "showcase", "cookbook",
 }
 RELEVANT_EXTENSIONS = set(EXTENSION_LANGUAGE_MAP.keys())
 
