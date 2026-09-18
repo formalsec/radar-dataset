@@ -119,6 +119,7 @@
           "new Mastra("
         ],
         "OpenAI Agents SDK": [
+          "Agent(",
           "from agents import Agent",
           "from openai import Agent",
           "openai.agents"

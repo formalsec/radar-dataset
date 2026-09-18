@@ -30,7 +30,7 @@ removed from this file — add them to Table II first if they should be tracked.
 | **Pydantic AI** | `pydantic_ai.Agent`<br>`from pydantic_ai import Agent`<br>`@agent.tool`<br>`@agent.tool_plain` |
 | **Smolagents** | `ToolCallingAgent(`<br>`CodeAgent(`<br>`ManagedAgent(` |
 | **Haystack** | `from haystack import Agent`<br>`Agent(`<br>`Pipeline(` |
-| **OpenAI Agents SDK** | `from openai import Agent`<br>`from agents import Agent`<br>`openai.agents` |
+| **OpenAI Agents SDK** | `Agent(`<br>`from openai import Agent`<br>`from agents import Agent`<br>`openai.agents` |
 | **Bee Agent Framework** | `from beeai_framework.agents.react import ReActAgent`<br>`from beeai_framework.agents.requirement import RequirementAgent`<br>`ReActAgent(`<br>`RequirementAgent(`<br>*(package was renamed from `bee_agent_framework` to `beeai_framework`; match both import roots)* |
 | **Deep Agents** | `create_deep_agent(`<br>`from deepagents import create_deep_agent` *(the Python deepagents package -- same framework as JS's "Deep Agents JS" row below, canonicalized to one name via pattern_index.py's ALIASES, same as LangChain/LangChain.js)* |
 | **Google ADK** | `Agent(`<br>`LlmAgent(`<br>`from google.adk` *(Google's Agent Development Kit -- resolved via a google.adk submodule override in pattern_detector.py, so it's never misread as Google GenAI just because both import under plain google)* |
