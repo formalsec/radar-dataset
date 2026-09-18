@@ -189,9 +189,16 @@ def scan_tarball(detector, tar_bytes):
     ]
     tools_evidence = [
         {"name": tool_name, "agent": f["name"], "framework": f["framework"],
-         "file": f["file"], "line": f["line"], "line_content": f.get("line_content")}
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "source": "agent_tools_kwarg"}
         for f in findings if f["type"] == "agent"
         for tool_name in (f.get("tools_bound") or [])
+    ] + [
+        {"name": tool_name, "agent": f["name"], "framework": f["framework"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "source": "model_tool_binding"}
+        for f in findings if f["type"] == "custom_agent"
+        for tool_name in (f.get("tool_names") or [])
     ]
 
     # n_agents counts every confirmed agent-creation call site, not unique
@@ -201,6 +208,8 @@ def scan_tarball(detector, tar_bytes):
     tools_bound_all = set()
     for a in agent_instances:
         tools_bound_all.update(a.get("tools_bound", []))
+    for c in custom_agent_instances:
+        tools_bound_all.update(c.get("tool_names") or [])
     n_tools = len(tools_bound_all)
     has_rag = len(store_instances) > 0
 

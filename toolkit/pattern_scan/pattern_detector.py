@@ -1269,6 +1269,19 @@ def _detect_agent_markers(source_lines):
 _BIND_TOOLS_RE = re.compile(r"\b(\w+)\.(?:bind_tools|bindTools)\s*\(")
 
 
+_JS_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _extract_js_bind_tools_names(text, call_end):
+    """Extract identifiers from a same-line literal tool array."""
+    m = re.match(r"\s*\[([^\]]*)\]", text[call_end:])
+    if not m:
+        return None
+    names = [tok.strip() for tok in m.group(1).split(",")]
+    names = [n for n in names if _JS_IDENTIFIER_RE.fullmatch(n)]
+    return names or None
+
+
 def _detect_bind_tools_calls(source_lines):
     hits = []
     for idx, text in enumerate(source_lines, start=1):
@@ -1276,7 +1289,8 @@ def _detect_bind_tools_calls(source_lines):
         if m:
             hits.append({
                 "line": idx, "variable": m.group(1), "framework": "LangChain",
-                "matched_call": m.group(0).strip(), "tool_names": None,
+                "matched_call": m.group(0).strip(),
+                "tool_names": _extract_js_bind_tools_names(text, m.end()),
             })
     return hits
 
