@@ -28,6 +28,7 @@ import argparse
 import gc
 import io
 import os
+import re
 import sys
 import tarfile
 import time
@@ -48,6 +49,11 @@ EXCLUDED_DIR_NAMES = {
     ".pytest_cache", "coverage", ".tox", "vendor", "test", "tests", "evals",
 }
 RELEVANT_EXTENSIONS = set(EXTENSION_LANGUAGE_MAP.keys())
+
+# Test files colocated next to source (not inside test/tests dirs) -- confirmed a major over-count source, e.g. getpaseo/paseo's agent-manager.test.ts alone contributed 180 of its 609 detected "agents".
+EXCLUDED_FILENAME_RE = re.compile(
+    r"\.(?:test|spec)\.[jt]sx?$|(?:^|/)test_[^/]+\.py$|_test\.py$", re.IGNORECASE
+)
 
 
 def fetch_tarball_bytes(client, owner, repo, ref="HEAD"):
@@ -74,6 +80,8 @@ def iter_tarball_source_files(tar_bytes):
             if not rel:
                 continue
             if any(part in EXCLUDED_DIR_NAMES for part in rel.split("/")):
+                continue
+            if EXCLUDED_FILENAME_RE.search(rel):
                 continue
 
             suffix = Path(rel).suffix.lower()
