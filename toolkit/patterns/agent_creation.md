@@ -43,7 +43,7 @@ removed from this file — add them to Table II first if they should be tracked.
 |-----------|-------------------|
 | **LangChain.js** | `createReactAgent(`<br>`createOpenAIToolsAgent(`<br>`createToolCallingAgent(`<br>`new AgentExecutor(` |
 | **LangGraph.js** | `new StateGraph(`<br>`.addNode(`<br>`.compile(` |
-| **Mastra** | `new Mastra(`<br>`createAgent(`<br>`@mastra/core`<br>`new Agent<`<br>`MastraAgent` |
+| **Mastra** | `new Mastra(`<br>`createAgent(`<br>`@mastra/core`<br>`new Agent(`<br>`new Agent<[^>]*>\s*\(`<br>`MastraAgent` |
 | **Vercel AI SDK** | `generateText(`<br>`streamText(`<br>`from 'ai'`<br>`from '@ai-sdk/` |
 | **ElizaOS** | `createEliza(`<br>`ElizaAgent(`<br>`new AgentRuntime(`<br>`@elizaos/core` |
 | **Deep Agents JS** | `createDeepAgent(`<br>`from "deepagents"`<br>`from 'deepagents'`<br>`\bDeepAgent\b`<br>`\bCreateDeepAgentParams\b` |

@@ -117,7 +117,8 @@
           "@mastra/core",
           "MastraAgent",
           "createAgent(",
-          "new Agent<",
+          "new Agent(",
+          "new Agent<[^>]*>\\s*\\(",
           "new Mastra("
         ],
         "OpenAI Agents SDK": [

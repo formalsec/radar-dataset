@@ -1160,6 +1160,17 @@ def _js_tools(expression, tokens, filename, sources, seen=frozenset()):
     if expression[0] == "[":
         return [name for part in _js_parts(_js_group(expression, 0))
                 for name in _js_tools(part, tokens, filename, sources, seen)]
+    if expression[0] == "{":
+        names = []
+        for part in _js_parts(_js_group(expression, 0)):
+            if not part:
+                continue
+            value = part[2:] if len(part) > 2 and part[1] == ":" else part
+            if len(value) == 1 and re.fullmatch(r"[A-Za-z_$][\w$]*", value[0]):
+                names.append(value[0])
+            else:
+                names.extend(_js_tools(value, tokens, filename, sources, seen))
+        return names
     if expression[0] == "...":
         return _js_tools(expression[1:], tokens, filename, sources, seen)
     if expression[:1] == ["new"] and len(expression) > 3 and expression[3] == "{":
@@ -1227,6 +1238,16 @@ def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs
         if not m.group().startswith(("'", '\"', "`")):
             code[m.start():m.end()] = m.group()
     code = "".join(code)
+    has_mastra_agent = False
+    for i, token in enumerate(tokens):
+        if token != "import" or tokens[i + 1:i + 2] != ["{"]:
+            continue
+        imports = _js_group(tokens, i + 1)
+        tail = tokens[i + len(imports) + 3:i + len(imports) + 5]
+        if (len(tail) == 2 and tail[0] == "from"
+                and tail[1][1:-1] in ("@mastra/core", "@mastra/core/agent")
+                and any(part == ["Agent"] for part in _js_parts(imports))):
+            has_mastra_agent = True
     has_graph_context = bool(_JS_GRAPH_COMPILE_CONTEXT_RE.search(code))
     call_tokens = {m.start(): i for i, m in enumerate(matches) if m.group() == "("}
     hits, seen = [], set()
@@ -1236,6 +1257,8 @@ def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs
         if label == "MCP SDK" or (allowed_langs is not None and "javascript" not in allowed_langs):
             continue
         if "(" not in pattern_str:
+            continue
+        if label == "Mastra" and pattern_str.startswith("new Agent") and not has_mastra_agent:
             continue
         for m in regex.finditer(code):
             opening = code.find("(", m.start(), m.end())
