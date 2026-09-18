@@ -873,6 +873,108 @@
           "python"
         ]
       }
+    },
+    "tool_definition": {
+      "frameworks": {
+        "Agno": [
+          "@tool"
+        ],
+        "Browser-use": [
+          "@controller.action",
+          "from browser_use import Controller"
+        ],
+        "CopilotKit": [
+          "useCopilotAction("
+        ],
+        "CrewAI": [
+          "@tool",
+          "BaseTool",
+          "from crewai.tools import tool",
+          "from crewai_tools import tool"
+        ],
+        "Google ADK": [
+          "FunctionTool(",
+          "from google.adk.tools import FunctionTool"
+        ],
+        "LangChain": [
+          "@tool",
+          "StructuredTool.from_function(",
+          "from langchain.tools import tool",
+          "from langchain_core.tools import tool",
+          "new DynamicStructuredTool(",
+          "new DynamicTool("
+        ],
+        "LlamaIndex": [
+          "FunctionTool.from_defaults(",
+          "QueryEngineTool(",
+          "from llama_index.core.tools import FunctionTool"
+        ],
+        "MCP SDK": [
+          "@mcp.tool",
+          "from mcp.server.fastmcp import FastMCP",
+          "server.setRequestHandler(CallToolRequestSchema",
+          "server.setRequestHandler(ListToolsRequestSchema",
+          "server.tool("
+        ],
+        "Mastra": [
+          "createTool(",
+          "from '@mastra/core/tools'"
+        ],
+        "OpenAI Agents SDK": [
+          "@function_tool",
+          "FunctionTool(",
+          "from agents import function_tool"
+        ],
+        "Pydantic AI": [
+          "@agent.tool",
+          "@agent.tool_plain"
+        ],
+        "Smolagents": [
+          "@tool",
+          "from smolagents import tool"
+        ]
+      },
+      "generic": {},
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "Browser-use": [
+          "python"
+        ],
+        "CopilotKit": [
+          "javascript"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Google ADK": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "MCP SDK": [
+          "javascript",
+          "python"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Pydantic AI": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
+        ]
+      }
     }
   }
 }

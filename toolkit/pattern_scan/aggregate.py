@@ -41,6 +41,7 @@ def main():
             "n_agents": rs.get("n_agents", 0),
             "n_custom_agents": rs.get("n_custom_agents", 0),
             "n_tools": rs.get("n_tools", 0),
+            "n_tool_definition_markers": rs.get("n_tool_definition_markers", 0),
             "has_rag": rs.get("has_rag", False),
         })
 
@@ -49,8 +50,10 @@ def main():
     total_agents = sum(x["n_agents"] for x in rows)
     total_custom_agents = sum(x["n_custom_agents"] for x in rows)
     total_tools = sum(x["n_tools"] for x in rows)
+    total_tool_definition_markers = sum(x["n_tool_definition_markers"] for x in rows)
     n_repos_with_agents = sum(1 for x in rows if x["n_agents"] > 0)
     n_repos_with_tools = sum(1 for x in rows if x["n_tools"] > 0)
+    n_repos_with_tool_definition_markers = sum(1 for x in rows if x["n_tool_definition_markers"] > 0)
     n_repos_with_rag = sum(1 for x in rows if x["has_rag"])
 
     print(f"Records in file: {len(records)}  (scanned={len(scanned)}, failed={len(failed)})\n")
@@ -70,6 +73,8 @@ def main():
     print(f"total n_tools:                {total_tools}")
     print(f"repos with >=1 agent:         {n_repos_with_agents}")
     print(f"repos with >=1 tool:          {n_repos_with_tools}")
+    print(f"total n_tool_definition_markers (UNCONFIRMED): {total_tool_definition_markers}")
+    print(f"repos with >=1 tool definition marker (UNCONFIRMED): {n_repos_with_tool_definition_markers}")
     print(f"repos with RAG/memory store:  {n_repos_with_rag}")
 
     if failed:
@@ -80,7 +85,8 @@ def main():
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=["repo_name", "stars", "n_agents",
-                                                     "n_custom_agents", "n_tools", "has_rag"])
+                                                     "n_custom_agents", "n_tools",
+                                                     "n_tool_definition_markers", "has_rag"])
             writer.writeheader()
             writer.writerows(rows)
         print(f"\nWrote per-repo CSV to {args.csv}")
@@ -93,8 +99,10 @@ def main():
             "total_n_agents": total_agents,
             "total_n_custom_agents": total_custom_agents,
             "total_n_tools": total_tools,
+            "total_n_tool_definition_markers_unconfirmed": total_tool_definition_markers,
             "repos_with_at_least_1_agent": n_repos_with_agents,
             "repos_with_at_least_1_tool": n_repos_with_tools,
+            "repos_with_at_least_1_tool_definition_marker_unconfirmed": n_repos_with_tool_definition_markers,
             "repos_with_rag": n_repos_with_rag,
         }
         with open(args.totals_json, "w", encoding="utf-8") as f:

@@ -206,7 +206,9 @@ class FileResult:
     llm_tool_calls: list = field(default_factory=list)  # Option A: confirmed OpenAI/Anthropic tools= calls
     tool_use_markers: list = field(default_factory=list)  # custom tool-registration markers (line-located)
     agent_markers: list = field(default_factory=list)  # custom agent-abstraction markers (line-located)
+    tool_definition_markers: list = field(default_factory=list)  # Unconfirmed definition markers
     custom_agents: list = field(default_factory=list)  # confirmed hand-rolled agents, see _group_custom_agents
+    confirmed_tool_definitions: list = field(default_factory=list)  # Confirmed Python tool definitions
 
 
 class CompiledCategory:
@@ -296,6 +298,7 @@ class PatternDetector:
         self._rag_writes_category = self.categories.get("rag_writes")
         self._rag_reads_category = self.categories.get("rag_reads")
         self._agent_calls_category = self.categories.get("agent_calls")
+        self._tool_definition_category = self.categories.get("tool_definition")
 
     def analyze(self, filepath):
         filepath = Path(filepath)
@@ -334,16 +337,19 @@ class PatternDetector:
             return FileResult(language=language, skipped_reason=f"file too large ({size_bytes} bytes)")
 
         source_lines = source.splitlines()
+        tool_definition_markers = _detect_tool_definition_markers(source_lines)
         if language == "python":
             reduced = _reduce_python(
                 source, self._agent_creation_category,
                 self._rag_creation_category, self._rag_writes_category,
                 self._rag_reads_category, self._agent_calls_category,
+                self._tool_definition_category,
                 external_exports=external_exports,
             )
             (reduced_text, parse_error, named_agents, named_stores,
              store_links, tainted_writes, write_sites, read_sites, call_sites, imports,
-             llm_tool_calls, tool_use_markers, agent_markers) = reduced
+             llm_tool_calls, tool_use_markers, agent_markers,
+             confirmed_tool_definitions) = reduced
         else:
             reduced_text, parse_error = _reduce_javascript(source), None
             named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], []
@@ -356,6 +362,7 @@ class PatternDetector:
             llm_tool_calls = _detect_bind_tools_calls(source_lines)
             tool_use_markers = _detect_tool_use_markers(source_lines)
             agent_markers = _detect_agent_markers(source_lines)
+            confirmed_tool_definitions = []
 
         result = FileResult(
             language=language, parse_error=parse_error,
@@ -364,7 +371,9 @@ class PatternDetector:
             write_sites=write_sites, read_sites=read_sites, call_sites=call_sites,
             imports=imports, llm_tool_calls=llm_tool_calls,
             tool_use_markers=tool_use_markers, agent_markers=agent_markers,
+            tool_definition_markers=tool_definition_markers,
             custom_agents=_group_custom_agents(llm_tool_calls),
+            confirmed_tool_definitions=confirmed_tool_definitions,
         )
 
         # ONE flat list, same shape for everything: what was found, what
@@ -430,6 +439,18 @@ class PatternDetector:
                 "type": "agent_marker", "name": None, "framework": None,
                 "matched": m["matched"], "line": m["line"],
                 "line_content": _line_content(m["line"]),
+            })
+        for m in tool_definition_markers:
+            findings.append({
+                "type": "tool_definition", "name": None, "framework": None,
+                "matched": m["matched"], "line": m["line"],
+                "line_content": _line_content(m["line"]),
+            })
+        for t in confirmed_tool_definitions:
+            findings.append({
+                "type": "confirmed_tool_definition", "name": t["name"], "framework": t["framework"],
+                "matched": t.get("matched_call"), "line": t["line"],
+                "line_content": _line_content(t["line"]),
             })
         # custom_agent: a hand-rolled agent counted separately from
         # framework-confirmed ones (n_custom_agents in scan_api.py, not
@@ -1089,6 +1110,16 @@ _AGENT_MARKER_PATTERN = re.compile(
 # build agents), which is exactly why framework-based detection is the
 # primary signal and these markers are only a secondary, unconfirmed one.
 
+_TOOL_DEFINITION_MARKER_PATTERN = re.compile(
+    r"@tool\b|@function_tool\b|@agent\.tool\b|@agent\.tool_plain\b|"
+    r"@mcp\.tool\b|@server\.call_tool\b|@server\.list_tools\b|"
+    r"@controller\.action\b|"
+    r"\bBaseTool\b|\bFunctionTool\s*\(|\bQueryEngineTool\s*\(|"
+    r"\bStructuredTool\.from_function\s*\(|"
+    r"\bnew\s+DynamicStructuredTool\s*\(|\bnew\s+DynamicTool\s*\(|"
+    r"\bcreateTool\s*\(|\buseCopilotAction\s*\("
+)
+
 
 
 def _scan_line_markers(source_lines, pattern):
@@ -1287,11 +1318,13 @@ def _detect_agent_markers(source_lines):
     return _scan_line_markers(source_lines, _AGENT_MARKER_PATTERN)
 
 
+def _detect_tool_definition_markers(source_lines):
+    return _scan_line_markers(source_lines, _TOOL_DEFINITION_MARKER_PATTERN)
+
+
 # `.bind_tools(`/`.bindTools(` -- LangChain's API for handing tools to a
 # model outside its packaged agent constructors.
 _BIND_TOOLS_RE = re.compile(r"\b(\w+)\.(?:bind_tools|bindTools)\s*\(")
-
-
 _JS_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
 
@@ -1379,17 +1412,19 @@ def _group_custom_agents(llm_tool_calls):
     return ordered
 
 
-def _reduce_python(source, agent_creation_category, rag_creation_category, rag_writes_category, rag_reads_category=None, agent_calls_category=None, external_exports=None):
+def _reduce_python(source, agent_creation_category, rag_creation_category, rag_writes_category, rag_reads_category=None, agent_calls_category=None, tool_definition_category=None, external_exports=None):
     """
     Returns (reduced_text, parse_error, named_agents, named_stores,
-    store_agent_links, tainted_writes).
+    store_agent_links, tainted_writes, write_sites, read_sites, call_sites,
+    imports, llm_tool_calls, tool_use_markers, agent_markers,
+    confirmed_tool_definitions).
     """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as e:
-        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], []
+        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], [], []
     except RecursionError as e:
-        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], []
+        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], [], []
 
     source_lines = source.splitlines()
     import_aliases = _build_import_aliases(tree)
@@ -1402,6 +1437,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     pending_agent_calls = {}
     pending_store_calls = {}
     pending_llm_clients = {}
+    pending_tool_def_calls = {}
+    confirmed_tool_definitions = []
     assign_target_for_call = {}
     assigns_by_func_and_name = {}  # (func_ctx, var_name) -> most recent Assign.value node
 
@@ -1492,6 +1529,17 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     "matched_call": call_text,
                 }
 
+            if tool_definition_category is not None:
+                tool_def_framework = _match_constructor_text(call_text, tool_definition_category, call_frameworks)
+                if tool_def_framework is None and canonical_text:
+                    tool_def_framework = _match_constructor_text(canonical_text, tool_definition_category, call_frameworks)
+                if tool_def_framework is not None:
+                    pending_tool_def_calls[id(node)] = {
+                        "framework": tool_def_framework,
+                        "line": node.lineno,
+                        "matched_call": call_text,
+                    }
+
             # LLM SDK client creation (Option A foundation): confirms which
             # variable is a real OpenAI/Anthropic client, so a later
             # `.chat.completions.create(tools=...)` on it can be trusted as
@@ -1515,6 +1563,24 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     lines.append(f"@{ast.unparse(dec)}")
                 except Exception:
                     continue
+                if (tool_definition_category is not None
+                        and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                    dec_func = dec.func if isinstance(dec, ast.Call) else dec
+                    dec_frameworks = _frameworks_for_call_identifier(dec_func, import_aliases)
+                    dec_text = f"@{_resolve_expr_text(dec_func)}"
+                    dec_fw = _match_constructor_text(dec_text, tool_definition_category, dec_frameworks)
+                    if dec_fw is None:
+                        canonical_dec = _canonical_call_text(dec_func, import_aliases)
+                        if canonical_dec:
+                            dec_fw = _match_constructor_text(
+                                f"@{canonical_dec[:-1]}", tool_definition_category, dec_frameworks,
+                            )
+                    if dec_fw is not None:
+                        confirmed_tool_definitions.append({
+                            "framework": dec_fw, "name": node.name,
+                            "line": getattr(dec, "lineno", node.lineno),
+                            "matched_call": dec_text,
+                        })
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             lines.append(node.value)
         elif isinstance(node, ast.Assign):
@@ -1592,6 +1658,14 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             store_framework_by_var[var_name] = entry["framework"]
         named_stores.append({
             "variable": var_name, "framework": entry["framework"], "line": entry["line"],
+            "matched_call": entry["matched_call"],
+        })
+
+    for call_id, entry in pending_tool_def_calls.items():
+        confirmed_tool_definitions.append({
+            "framework": entry["framework"],
+            "name": assign_target_for_call.get(call_id),
+            "line": entry["line"],
             "matched_call": entry["matched_call"],
         })
 
@@ -1831,7 +1905,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
 
     return ("\n".join(lines), None, named_agents, named_stores,
             store_agent_links, tainted_writes, write_sites, read_sites, call_sites, imports,
-            llm_tool_calls, tool_use_markers, agent_markers)
+            llm_tool_calls, tool_use_markers, agent_markers, confirmed_tool_definitions)
 
 
 def _reduce_javascript(source):

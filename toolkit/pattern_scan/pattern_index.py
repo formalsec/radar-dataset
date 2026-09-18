@@ -39,6 +39,7 @@ CATEGORY_FILES = {
     "rag_writes": "patterns/rag_writes.md",
     "rag_reads": "patterns/rag_reads.md",
     "a2a_interaction": "patterns/a2a_interaction.md",
+    "tool_definition": "patterns/tool_definition.md",
 }
 
 BACKTICK_RE = re.compile(r"`([^`]+)`")

@@ -199,6 +199,16 @@ def scan_tarball(detector, tar_bytes):
          "source": "model_tool_binding"}
         for f in findings if f["type"] == "custom_agent"
         for tool_name in (f.get("tool_names") or [])
+    ] + [
+        {"name": f["name"], "agent": None, "framework": f["framework"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "source": "confirmed_tool_definition"}
+        for f in findings if f["type"] == "confirmed_tool_definition" and f.get("name")
+    ]
+    tool_definition_evidence = [
+        {"file": f["file"], "line": f["line"], "matched": f["matched"],
+         "line_content": f.get("line_content")}
+        for f in findings if f["type"] == "tool_definition"
     ]
 
     # n_agents counts every confirmed agent-creation call site, not unique
@@ -210,6 +220,9 @@ def scan_tarball(detector, tar_bytes):
         tools_bound_all.update(a.get("tools_bound", []))
     for c in custom_agent_instances:
         tools_bound_all.update(c.get("tool_names") or [])
+    tools_bound_all.update(
+        ev["name"] for ev in tools_evidence if ev["source"] == "confirmed_tool_definition"
+    )
     n_tools = len(tools_bound_all)
     has_rag = len(store_instances) > 0
 
@@ -248,6 +261,11 @@ def scan_tarball(detector, tar_bytes):
         "llm_tool_names": custom_agent_llm_tool_names,
         "n_tools": n_tools,
         "tools_evidence": tools_evidence,
+        "n_confirmed_tool_definitions": sum(
+            1 for ev in tools_evidence if ev["source"] == "confirmed_tool_definition"
+        ),
+        "n_tool_definition_markers": len(tool_definition_evidence),
+        "tool_definition_evidence": tool_definition_evidence,
         "has_rag": has_rag,
         "shared_across_agents": shared_across_agents,
         "rag_writers": rag_writers,
