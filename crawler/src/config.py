@@ -2,7 +2,13 @@
 """
 Configuration for GitHub Repo Crawler
 """
+from pathlib import Path
+
 from frameworks import Frameworks
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = PROJECT_ROOT / "dataset"
+CRAWLER_OUTPUT_DIR = PROJECT_ROOT / "crawler" / "output"
 
 # Framework detector
 frameworks_manager = Frameworks()
@@ -70,6 +76,6 @@ SEARCH_QUERY_GROUPS = {
 }
 
 # File paths
-MASTER_FILE = 'all_repos.json'
-SEARCHED_URLS_FILE = 'searched_urls.json'
-CACHE_FILE = 'seen_repos.json'
+MASTER_FILE = DATA_DIR / 'all_repos.json'
+SEARCHED_URLS_FILE = DATA_DIR / 'searched_urls.json'
+CACHE_FILE = DATA_DIR / 'seen_repos.json'

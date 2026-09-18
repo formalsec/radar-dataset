@@ -323,7 +323,8 @@ def main(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("csv", type=Path, help="input CSV (package, class1, class2, class3); '-' for stdin")
-    p.add_argument("-o", "--output", type=Path, default=Path("venn_applications.png"),
+    p.add_argument("-o", "--output", type=Path,
+                   default=Path(__file__).resolve().parents[1] / "output" / "venn_diagram" / "venn_applications.png",
                    help="output image (.png/.pdf/.svg); use --show for an interactive window")
     p.add_argument("--show", action="store_true", help="open a window instead of writing a file")
     p.add_argument("--labels", nargs=3, metavar=("CLASS1", "CLASS2", "CLASS3"),
@@ -368,6 +369,9 @@ def main(argv=None):
 
     if args.members_csv:
         write_members(args.members_csv, regions, labels)
+
+    if not args.show:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
 
     draw(
         sets,

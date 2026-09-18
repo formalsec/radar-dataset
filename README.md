@@ -17,10 +17,12 @@ The analysis is intentionally structural rather than exploit-driven: it flags de
 ## Repository layout
 
 - crawler/: repository discovery, language filtering, framework detection, and README-based application/framework classification
-- crawler/classifications/: LLM-based classifiers for separating applications from frameworks
+- crawler/src/: crawler and LLM-based classifiers for separating applications from frameworks
+- crawler/output/: crawler runs, classification results, and Venn-diagram inputs/outputs
 - toolkit/: static-analysis tooling for scanning repository code
-- toolkit/patterns/: human-authored pattern definitions used to detect agentic constructs and risky data flows
-- toolkit/pattern_scan/: scanner and result aggregation code
+- toolkit/src/patterns/: human-authored pattern definitions used to detect agentic constructs and risky data flows
+- toolkit/src/: scanner and result aggregation code
+- toolkit/output/: scanner results and metadata sidecars
 - results and JSON artifacts: examples of intermediate and final outputs
 
 ## Dataset and methodology
@@ -81,34 +83,34 @@ GitHub unauthenticated access is limited to ~60 requests per hour, which is not 
 
 ### 1) Crawl candidate repositories
 
-The crawler configuration lives in crawler/config.py. It defines the language scopes, search queries, and repository-selection thresholds.
+The crawler configuration lives in crawler/src/config.py. It defines the language scopes, search queries, and repository-selection thresholds.
 
 ```bash
-python crawler/crawler.py
+python crawler/src/crawler.py
 ```
 
-The crawler writes intermediate results into timestamped directories under crawler/results_*/ and retains the repositories that pass both the language and framework filters.
+The crawler writes intermediate results into timestamped directories under crawler/output/crawl_results_*/ and retains the repositories that pass both the language and framework filters. Its persistent dataset state is stored under dataset/.
 
 ### 2) Classify repositories as applications vs. frameworks
 
-The classification step is handled under crawler/classifications/.
+The classification step is handled under crawler/src/ and writes generated files to crawler/output/llm_classifications/ by default.
 
 For Ollama-based classification:
 
 ```bash
 ollama serve
-python crawler/classifications/repoClassifier.py \
+python crawler/src/repoClassifier.py \
   --input urls_to_classify.txt \
-  --output classifications.json \
+  --output crawler/output/llm_classifications/classifications.json \
   --model llama3.3
 ```
 
 For GPT-based classification:
 
 ```bash
-python crawler/classifications/repoClassifierGPT.py \
+python crawler/src/repoClassifierGPT.py \
   --input urls_to_classify.txt \
-  --output classifications_gpt.json \
+  --output crawler/output/llm_classifications/classifications_gpt.json \
   --model gpt-5.4-mini
 ```
 
@@ -119,13 +121,13 @@ The scripts accept `--limit` and `--resume` options and write aggregate counts t
 Use the fetcher to download repository source code for the retained application set.
 
 ```bash
-python toolkit/github_fetcher.py <repo_list_file> <dest_dir> [--token TOKEN] [--max-workers N]
+python toolkit/src/github_fetcher.py <repo_list_file> <dest_dir> [--token TOKEN] [--max-workers N]
 ```
 
 Example:
 
 ```bash
-python toolkit/github_fetcher.py passed_urls.txt ./repos --max-workers 8
+python toolkit/src/github_fetcher.py crawler/output/crawl_results_YYYYMMDD_HHMMSS/passed_urls.txt ./repos --max-workers 8
 ```
 
 ### 4) Run the static scanner
@@ -133,13 +135,13 @@ python toolkit/github_fetcher.py passed_urls.txt ./repos --max-workers 8
 The scanner takes a JSON manifest of repositories (for example, the downloaded corpus or a filtered subset) and then analyzes the referenced repository source code to emit structured findings per repository.
 
 ```bash
-python -m toolkit.pattern_scan.scan_api <repos_json> [output_file] [--patterns FILE] [--token TOKEN] [--max-file-size BYTES] [--limit N] [--gc-every N]
+python -m toolkit.src.scan_api <repos_json> [output_file] [--patterns FILE] [--token TOKEN] [--max-file-size BYTES] [--limit N] [--gc-every N]
 ```
 
 Example:
 
 ```bash
-python -m toolkit.pattern_scan.scan_api corpus.json results.json --limit 50
+python -m toolkit.src.scan_api dataset/all_repos.json --limit 50
 ```
 
 ## Output format
@@ -155,7 +157,7 @@ The fetcher also writes a manifest with repository metadata such as URL, local p
 
 ## Pattern definitions
 
-The rules for matching relevant code patterns are kept in markdown files under toolkit/patterns/:
+The rules for matching relevant code patterns are kept in markdown files under toolkit/src/patterns/:
 
 - agent_creation.md
 - agent_calls.md

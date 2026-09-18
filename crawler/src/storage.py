@@ -7,12 +7,14 @@ import os
 from datetime import datetime
 from typing import List, Dict, Optional, Set
 
+from config import CACHE_FILE, MASTER_FILE, SEARCHED_URLS_FILE
+
 
 class StorageManager:
     def __init__(self):
-        self.master_file = 'all_repos.json'
-        self.searched_urls_file = 'searched_urls.json'
-        self.cache_file = 'seen_repos.json'
+        self.master_file = MASTER_FILE
+        self.searched_urls_file = SEARCHED_URLS_FILE
+        self.cache_file = CACHE_FILE
         
         # Load existing data
         self.passed_repos = self._load_passed_repos()

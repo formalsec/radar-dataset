@@ -33,14 +33,14 @@ import tarfile
 import time
 from pathlib import Path
 
-from ..github_fetcher import GitHubClient, GITHUB_API, _parse_owner_repo
+from .github_fetcher import GitHubClient, GITHUB_API, _parse_owner_repo
 from .incremental_json import IncrementalJSONArrayWriter, already_processed_keys
 from .pattern_detector import PatternDetector, EXTENSION_LANGUAGE_MAP, apply_framework_confirmation
 from .util import RunMetadata, timestamped_results_path, utc_now_iso
 
 _PACKAGE_DIR = Path(__file__).parent
 _DEFAULT_PATTERNS_PATH = _PACKAGE_DIR / "data" / "patterns_verified.json"
-_DEFAULT_RESULTS_DIR = _PACKAGE_DIR / "results"
+_DEFAULT_RESULTS_DIR = _PACKAGE_DIR.parent / "output" / "scan_results"
 
 EXCLUDED_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
@@ -312,7 +312,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("repos_json", help="your corpus JSON (metadata + repos[] with frameworks)")
     ap.add_argument("out_json", nargs="?", default=None,
-                     help="output path (default: pattern_scan/results/pattern_scan_results_<UTC timestamp>.json)")
+                     help="output path (default: toolkit/output/scan_results/pattern_scan_results_<UTC timestamp>.json)")
     ap.add_argument("--patterns", default=str(_DEFAULT_PATTERNS_PATH))
     ap.add_argument("--token", default=None, help="GitHub PAT (else reads GITHUB_TOKEN env var)")
     ap.add_argument("--max-file-size", type=int, default=2 * 1024 * 1024)

@@ -13,6 +13,7 @@ import gc
 
 from config import (
     frameworks_manager,
+    CRAWLER_OUTPUT_DIR,
     REQUIRED_LANGUAGES,
     MIN_LANGUAGE_PERCENTAGE,
     RESULTS_PER_PAGE,
@@ -47,7 +48,8 @@ class RepoCrawler:
         
         # Run tracking
         self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_file = f"run_{self.run_timestamp}.json"
+        self.output_dir = CRAWLER_OUTPUT_DIR / f"crawl_results_{self.run_timestamp}"
+        self.run_file = self.output_dir / f"run_{self.run_timestamp}.json"
         self.run_repos = []
         
         # Stats
@@ -60,14 +62,13 @@ class RepoCrawler:
         self.api_calls = 0
         
         # Create results directory
-        self.output_dir = f"results_{self.run_timestamp}"
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Open result files
-        self.passed_file = open(f"{self.output_dir}/passed_urls.txt", 'w')
-        self.failed_language_file = open(f"{self.output_dir}/failed_language.txt", 'w')
-        self.failed_framework_file = open(f"{self.output_dir}/failed_framework.txt", 'w')
-        self.all_searched_file = open(f"{self.output_dir}/all_searched.txt", 'w')
+        self.passed_file = open(self.output_dir / "passed_urls.txt", 'w')
+        self.failed_language_file = open(self.output_dir / "failed_language.txt", 'w')
+        self.failed_framework_file = open(self.output_dir / "failed_framework.txt", 'w')
+        self.all_searched_file = open(self.output_dir / "all_searched.txt", 'w')
         
         print(f"📁 Results will be saved in: {self.output_dir}/")
         print(f"📊 Target: {target} repos")

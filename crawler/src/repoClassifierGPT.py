@@ -14,6 +14,9 @@ import signal
 import sys
 import gc
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CLASSIFICATIONS_DIR = os.path.join(PROJECT_ROOT, 'crawler', 'output', 'llm_classifications')
+
 # Import your GPTClient
 from gpt import GPTClient
 
@@ -318,6 +321,7 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         """Save results to JSON file with counts"""
         # Update counts before saving
         self.update_counts(results)
+        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
         
         # Create backup
         if os.path.exists(output_file):
@@ -366,7 +370,7 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         # Create output file path if not provided
         if output_file is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_file = f"classifications_gpt_{timestamp}.json"
+            output_file = os.path.join(CLASSIFICATIONS_DIR, f"classifications_gpt_{timestamp}.json")
         
         self.results_file = output_file
         processed_urls = set()
@@ -595,7 +599,7 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         # Create output file path if not provided
         if output_file is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_file = f"classifications_gpt_{timestamp}.json"
+            output_file = os.path.join(CLASSIFICATIONS_DIR, f"classifications_gpt_{timestamp}.json")
         
         # Classify URLs with incremental saving
         results = self.classify_urls(urls, output_file, resume)
@@ -619,7 +623,7 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         # Create output file path if not provided
         if output_file is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            output_file = f"classifications_gpt_{timestamp}.json"
+            output_file = os.path.join(CLASSIFICATIONS_DIR, f"classifications_gpt_{timestamp}.json")
         
         # Classify URLs with incremental saving
         results = self.classify_urls(urls, output_file, resume)

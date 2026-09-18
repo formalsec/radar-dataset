@@ -12,6 +12,9 @@ import sys
 import gc
 import base64
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CLASSIFICATIONS_DIR = os.path.join(PROJECT_ROOT, 'crawler', 'output', 'llm_classifications')
+
 class RepoClassifier:
     def __init__(self, ollama_url="http://localhost:11434", model="llama3.3"):
         self.ollama_url = ollama_url
@@ -452,6 +455,7 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         """Save results to JSON file with counts"""
         # Update counts before saving
         self.update_counts(results)
+        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
         
         # Create backup
         if os.path.exists(output_file):
@@ -763,7 +767,10 @@ def main():
     print(f"Ollama timeout: {classifier.TIMEOUTS['ollama_generate']}s")
     
     if not args.output:
-        args.output = f"classifications_{args.model.replace(':', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        args.output = os.path.join(
+            CLASSIFICATIONS_DIR,
+            f"classifications_{args.model.replace(':', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
     
     results = classifier.process_urls(urls, args.output, resume=args.resume)
     

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 _PACKAGE_DIR = Path(__file__).parent
+_DEFAULT_SOURCE_DIR = _PACKAGE_DIR
 _DEFAULT_OUT_PATH = _PACKAGE_DIR / "data" / "patterns_verified.json"
 
 MASTER_FRAMEWORKS = [
@@ -139,6 +140,6 @@ def build_index(src_dir=".", out_path="patterns_verified.json"):
 
 
 if __name__ == "__main__":
-    src = sys.argv[1] if len(sys.argv) > 1 else "."
+    src = sys.argv[1] if len(sys.argv) > 1 else str(_DEFAULT_SOURCE_DIR)
     out = sys.argv[2] if len(sys.argv) > 2 else str(_DEFAULT_OUT_PATH)
     build_index(src, out)

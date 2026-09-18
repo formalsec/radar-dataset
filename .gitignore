@@ -21,16 +21,14 @@ ENV/
 !.env.example
 
 # Generated crawler outputs
-crawler/results_*/
-crawler/seen_repos.json
-crawler/classifications_*.json
-crawler/classifications_*.json.backup*
-crawler/*_backup.json
+#crawler/output/
+#crawler/seen_repos.json
+#crawler/classifications_*.json
+#crawler/classifications_*.json.backup*
+#crawler/*_backup.json
 
 # Generated scanner outputs and downloaded repositories
-toolkit/pattern_scan/results/
-toolkit/pattern_scan/repos/
-toolkit/pattern_scan/downloads/
+toolkit/output/
 
 # Generated manifests and temporary data
 *.meta.json
