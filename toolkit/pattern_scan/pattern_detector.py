@@ -1026,6 +1026,53 @@ LLM_CLIENT_CONSTRUCTORS = {
 # client must trace back to a real OpenAI/Anthropic SDK import.
 LLM_TOOL_CALL_METHODS = {"create", "stream"}  # .chat.completions.create(, .messages.create(, .messages.stream(
 
+# Provider-key evidence for otherwise unrecognized clients.
+LLM_ENV_VAR_PROVIDERS = {
+    "GROQ_API_KEY": "Groq SDK",
+    "TOGETHER_API_KEY": "Together SDK",
+    "MISTRAL_API_KEY": "Mistral SDK",
+    "COHERE_API_KEY": "Cohere SDK",
+    "DEEPSEEK_API_KEY": "DeepSeek SDK",
+    "XAI_API_KEY": "xAI SDK",
+    "GROK_API_KEY": "xAI SDK",
+    "OPENROUTER_API_KEY": "OpenRouter",
+    "FIREWORKS_API_KEY": "Fireworks SDK",
+    "PERPLEXITY_API_KEY": "Perplexity SDK",
+    "REPLICATE_API_TOKEN": "Replicate",
+    "HUGGINGFACE_API_KEY": "HuggingFace",
+    "HUGGINGFACEHUB_API_TOKEN": "HuggingFace",
+    "HF_TOKEN": "HuggingFace",
+    "GOOGLE_API_KEY": "Google GenAI",
+    "GEMINI_API_KEY": "Google GenAI",
+    "CEREBRAS_API_KEY": "Cerebras SDK",
+    "NVIDIA_API_KEY": "NVIDIA NIM",
+}
+
+
+def _env_var_provider(node):
+    """Recognize the key of an actual environment lookup, not nearby strings."""
+    key = None
+    if isinstance(node, ast.Call):
+        path = _resolve_expr_text(node.func)
+        if path in {"os.getenv", "os.environ.get", "environ.get"} and node.args:
+            key = node.args[0]
+    elif isinstance(node, ast.Subscript):
+        if _resolve_expr_text(node.value) in {"os.environ", "environ"}:
+            key = node.slice
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return LLM_ENV_VAR_PROVIDERS.get(key.value)
+    return None
+
+
+def _call_references_llm_env_var(call_node):
+    for arg in list(call_node.args) + [kw.value for kw in call_node.keywords]:
+        for node in ast.walk(arg):
+            provider = _env_var_provider(node)
+            if provider:
+                return provider
+    return None
+
+
 def _llm_constructor_name(func, import_aliases):
     canonical = _canonical_call_text(func, import_aliases)
     return canonical[:-1].rsplit(".", 1)[-1] if canonical else _callee_simple_name(func)
@@ -1059,6 +1106,20 @@ def _build_llm_client_factory_functions(tree, import_aliases):
                 factories[fn.name] = LLM_CLIENT_CONSTRUCTORS[name]
                 break
     return factories
+
+
+def _build_llm_env_var_classes(tree):
+    """Map local classes with provider-key lookups to candidate providers."""
+    providers = {}
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for node in ast.walk(cls):
+            provider = _env_var_provider(node)
+            if provider:
+                providers[cls.name] = provider
+                break
+    return providers
 
 
 def _extract_literal_tool_names(tools_node):
@@ -1472,6 +1533,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
         tree, agent_creation_category, rag_creation_category, import_aliases
     )
     llm_client_factory_functions = _build_llm_client_factory_functions(tree, import_aliases)
+    llm_env_var_classes = _build_llm_env_var_classes(tree)
 
     lines = []
     pending_agent_calls = {}
@@ -1596,6 +1658,16 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     "framework": llm_client_factory_functions[llm_client_name],
                     "line": node.lineno,
                 }
+            else:
+                # Fallback evidence; request paths are checked below.
+                env_provider = _call_references_llm_env_var(node)
+                if env_provider is None and isinstance(callee, ast.Name):
+                    env_provider = llm_env_var_classes.get(callee.id)
+                if env_provider is not None:
+                    pending_llm_clients[id(node)] = {
+                        "framework": f"Custom ({env_provider})",
+                        "line": node.lineno,
+                    }
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             for dec in node.decorator_list:
@@ -1868,6 +1940,12 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
         request_path = _resolve_expr_text(node.func)[len(base_var) + 1:]
         if framework == "Mistral SDK":
             if request_path not in {"chat.complete", "chat.complete_async", "chat.stream", "chat.stream_async"}:
+                continue
+        elif framework.startswith("Custom ("):
+            # An API key alone is not proof of an LLM client. Require a
+            # recognizable request namespace as corroborating evidence.
+            if request_path not in {"chat.completions.create", "messages.create", "messages.stream",
+                                    "responses.create", "chat.complete", "chat.complete_async"}:
                 continue
         elif node.func.attr not in LLM_TOOL_CALL_METHODS:
             continue
