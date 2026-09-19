@@ -364,7 +364,10 @@ class PatternDetector:
             llm_tool_calls = _detect_bind_tools_calls(source_lines)
             tool_use_markers = _detect_tool_use_markers(source_lines)
             agent_markers = _detect_agent_markers(source_lines)
-            confirmed_tool_definitions = []
+            confirmed_tool_definitions = (
+                _detect_webmcp_tool_definitions(source_lines, filename, javascript_sources)
+                + _detect_js_registry_tool_definitions(source_lines, filename, javascript_sources)
+            )
 
         result = FileResult(
             language=language, parse_error=parse_error,
@@ -1331,6 +1334,344 @@ def _js_tools(expression, tokens, filename, sources, seen=frozenset()):
                         return _js_tools([part[0], *expression[1:]], imported, path, {}, seen)
     # Match Python's explicit-list behavior for unresolved tool variables.
     return [] if is_call else [name]
+
+
+# Confirmed JS/TS tool-DEFINITION detection, independent of agent detection.
+#
+# Covers two shapes neither `_js_tools` above (which resolves tools BOUND to
+# an already-detected agent) nor the plain-text `_TOOL_DEFINITION_MARKER_PATTERN`
+# markers (unconfirmed, never counted) can see:
+#   1. A plain-object MCP tool registry (`{name, description, inputSchema}`
+#      objects assembled into an array via imports/spreads, e.g. Mastra-less
+#      hand-rolled MCP servers) that is actually served through an MCP
+#      tools/list or dispatch handler, following the catalog's imports --
+#      object shape alone is NOT enough; the handler must reference it.
+#   2. A tool object passed to WebMCP's `provider.registerTool(tool, ...)`,
+#      whose `name` may be a string literal or a member expression referring
+#      to an imported name constant (`WEBMCP_SPA_TOOL.openCountryBrief`).
+_TOOL_SCHEMA_KEYS = {"inputSchema", "parameters", "schema"}
+_TOOL_SHAPE_KEYS = {"description", "execute"} | _TOOL_SCHEMA_KEYS
+_MCP_DISPATCH_MARKER_RE = re.compile(
+    r"['\"]tools/list['\"]|\b(?:ListToolsRequestSchema|CallToolRequestSchema)\b"
+)
+# Naming convention for an assembled MCP tool CATALOG specifically --
+# TOOL_REGISTRY, TOOLS_REGISTRY, a bare TOOLS, or anything ending in
+# `_REGISTRY`. Deliberately does NOT match `CACHE_TOOLS`/`RPC_TOOLS`-style
+# per-category arrays (a bare `*_TOOLS` suffix): those are reached anyway,
+# via this same identifier's spread resolution once the enclosing registry
+# is found, and independently treating each of THEM as its own entry point
+# double-counts every tool once per sub-array's own file, confirmed against
+# WorldMonitor's actual layout (`rpc-tools.ts`/`nlp-tools.ts` each mention
+# "tools/list" in their own doc comments, which would otherwise make them
+# false standalone entry points).
+_JS_TOOL_REGISTRY_NAME_RE = re.compile(r"\b(?:[A-Z][A-Z0-9]*_)*REGISTRY\b|\bTOOLS\b")
+
+
+def _js_tool_def_object_name(obj_tokens, tokens, filename, sources, seen):
+    """Return a tool-shaped object's statically resolved string name."""
+    keys, name_val = set(), None
+    for part in _js_parts(obj_tokens):
+        if len(part) > 2 and part[1] == ":":
+            key = part[0].strip("\"'")
+            keys.add(key)
+            if key == "name":
+                name_val = part[2:]
+        elif len(part) == 1:
+            keys.add(part[0])
+    if "name" not in keys or not (keys & _TOOL_SHAPE_KEYS) or not name_val:
+        return None
+    if len(name_val) == 1 and name_val[0][:1] in ("'", '"'):
+        return name_val[0][1:-1]
+    names = _js_tool_registry_names(name_val, tokens, filename, sources, seen, literal_name=True)
+    return names[0] if names else None
+
+
+
+def _js_skip_type_annotation(tokens, i):
+    """`i` points just past a declared variable's name. If a TS type
+    annotation follows (`: ToolDef[]`), skip past it and return the index of
+    the `=` that follows; otherwise `i` already points at (or past) `=`."""
+    if tokens[i:i + 1] != [":"]:
+        return i
+    depth = 0
+    j = i + 1
+    while j < len(tokens):
+        t = tokens[j]
+        if t in ("<", "(", "[", "{"):
+            depth += 1
+        elif t in (">", ")", "]", "}"):
+            depth -= 1
+        elif t == "=" and depth <= 0:
+            return j
+        j += 1
+    return j
+
+
+def _js_tool_registry_names(expression, tokens, filename, sources, seen, literal_name=False):
+    """
+    Resolve an assembled tool-registry array to its members' literal names:
+    array literals, `...spread` of another array (same-file or imported),
+    and object-literal tool definitions. Recurses across import hops (unlike
+    `_js_tools`, which only follows one hop) because a real registry is
+    typically assembled in one file from arrays defined in others, e.g.
+    `TOOL_REGISTRY = [...CACHE_TOOLS, ...RPC_TOOLS]` where each of those is
+    itself imported from its own module.
+    """
+    if not expression:
+        return []
+    if literal_name and expression[0][:1] in ("'", '"'):
+        return [expression[0][1:-1]] if len(expression) == 1 or expression[1] in (";", "as") else []
+    if literal_name and expression[0] == "{":
+        return []
+    if expression[0] == "[":
+        return [name for part in _js_parts(_js_group(expression, 0))
+                for name in _js_tool_registry_names(part, tokens, filename, sources, seen)]
+    if expression[0] == "{":
+        name = _js_tool_def_object_name(_js_group(expression, 0), tokens, filename, sources, seen)
+        return [name] if name else []
+    if expression[0] == "...":
+        return _js_tool_registry_names(expression[1:], tokens, filename, sources, seen)
+    name = expression[0]
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+        return []
+    key = (filename, name)
+    if key in seen:
+        return []
+    seen = seen | {key}
+    for i, token in enumerate(tokens):
+        if token in ("const", "let", "var") and tokens[i + 1:i + 2] == [name]:
+            eq_idx = _js_skip_type_annotation(tokens, i + 2)
+            if tokens[eq_idx:eq_idx + 1] == ["="]:
+                value = next(_js_parts(tokens[eq_idx + 1:]))
+                if literal_name and value[:4] == ["Object", ".", "freeze", "("]:
+                    value = _js_group(value, 3)
+                if literal_name and len(expression) > 1:
+                    if expression[1:2] != ["."] or len(expression) != 3 or value[:1] != ["{"]:
+                        return []
+                    value = _js_property(_js_group(value, 0), expression[2])
+                return _js_tool_registry_names(value, tokens, filename, sources, seen, literal_name)
+        if token == "import" and tokens[i + 1:i + 2] == ["{"]:
+            imports = _js_group(tokens, i + 1)
+            tail = tokens[i + len(imports) + 3:i + len(imports) + 5]
+            if len(tail) != 2 or tail[0] != "from" or not sources:
+                continue
+            for part in _js_parts(imports):
+                if not part or part[-1] != name:
+                    continue
+                module = tail[1][1:-1]
+                if not module.startswith("."):
+                    continue
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(filename), module))
+                stem = posixpath.splitext(target)[0]
+                for path in (target, stem + ".ts", stem + ".tsx", target + ".ts", target + "/index.ts"):
+                    if path in sources:
+                        imported = [m.group() for m in _js_tokens(sources[path])]
+                        # Unlike `_js_tools`, keep passing `sources` (not `{}`)
+                        # so resolution can continue for further import hops
+                        # -- a registry assembled from several imported arrays
+                        # needs to follow each of THEM to their own files too.
+                        return _js_tool_registry_names([part[0], *expression[1:]], imported, path, sources, seen, literal_name)
+    # Unresolved: unlike `_js_tools`'s tool-binding fallback, an unresolved
+    # registry reference is NOT itself a tool name -- return nothing rather
+    # than guess.
+    return []
+
+
+_WEBMCP_REGISTER_TOOL_RE = re.compile(r"\bregisterTool\s*\(")
+
+
+def _js_registration_names(tokens, filename, sources):
+    """Trace registration arguments through local bindings, named wrappers,
+    map/forEach callbacks, for-of loops and factory returns (at most 12 hops).
+
+    Token positions and enclosing braces keep same-named local bindings apart.
+    Unsupported/computed expressions and cycles produce no confirmed names.
+    """
+    pairs, scopes, stack = {}, [], []
+    for i, token in enumerate(tokens):
+        scopes.append(tuple(j for j in stack if tokens[j] == "{"))
+        if token in ("(", "[", "{"):
+            stack.append(i)
+        elif token in (")", "]", "}") and stack:
+            start = stack.pop()
+            pairs[start] = i
+
+    def expression_at(start):
+        end = start
+        while end < len(tokens) and tokens[end] not in (";", ",", ")", "]", "}"):
+            end = pairs.get(end, end) + 1
+        return tokens[start:end]
+
+    # Type parameters can contain commas (e.g. Pick<Provider, 'registerTool'>).
+    def parameters(start, end):
+        names, depth, first = [], 0, True
+        for token in tokens[start:end]:
+            if first:
+                names.append(token)
+                first = False
+            if token in ("<", "(", "[", "{"):
+                depth += 1
+            elif token in (">", ")", "]", "}"):
+                depth -= 1
+            elif token == "," and depth == 0:
+                first = True
+        return names
+
+    functions, declarations, iterations = [], [], []
+    for i, token in enumerate(tokens):
+        if token == "function" and tokens[i + 2:i + 3] == ["("] and i + 2 in pairs:
+            close = pairs[i + 2]
+            body = close + 1
+            while body < len(tokens) and tokens[body] not in ("{", ";", "="):
+                body += 1
+            if body in pairs and tokens[body] == "{":
+                functions.append((tokens[i + 1], i + 1, body, pairs[body],
+                                  parameters(i + 3, close)))
+        if token in ("const", "let", "var") and i + 1 < len(tokens):
+            eq = _js_skip_type_annotation(tokens, i + 2)
+            if tokens[eq:eq + 1] == ["="]:
+                declarations.append((tokens[i + 1], i, eq + 1))
+        if (token in ("map", "forEach") and tokens[max(0, i - 1):i] == ["."]
+                and i >= 2 and re.fullmatch(r"[A-Za-z_$][\w$]*", tokens[i - 2])
+                and tokens[max(0, i - 3):i - 2] != ["."] and i + 1 in pairs):
+            # Bounded callback shape: collection.map((item) => ...).
+            arg = i + 2
+            if tokens[arg:arg + 1] == ["("] and arg in pairs:
+                arrow = pairs[arg] + 1
+                params = parameters(arg + 1, pairs[arg])
+                if params and tokens[arrow:arrow + 2] == ["=", ">"]:
+                    iterations.append((params[0], arrow + 2, pairs[i + 1], [tokens[i - 2]], i - 2))
+        if token == "for" and tokens[i + 1:i + 3] == ["(", "const"] and i + 1 in pairs:
+            close = pairs[i + 1]
+            if tokens[i + 4:i + 5] == ["of"] and tokens[close + 1:close + 2] == ["{"]:
+                iterations.append((tokens[i + 3], close + 1, pairs.get(close + 1, close + 1),
+                                   tokens[i + 5:close], i))
+
+    def visible(binding, use):
+        return scopes[use][:len(scopes[binding])] == scopes[binding]
+
+    def trace(expr, pos, seen=frozenset(), depth=0):
+        key = (tuple(expr), pos)
+        if not expr or depth >= 12 or key in seen:
+            return []
+        seen = seen | {key}
+
+        def follow(value, where):
+            return trace(value, where, seen, depth + 1)
+
+        if expr[0] in ("[", "{"):
+            # Restrict object/array resolution to declarations visible here.
+            local_tokens = []
+            for _, decl, value in declarations:
+                if decl < pos and visible(decl, pos):
+                    local_tokens.extend(tokens[decl:value] + expression_at(value) + [";"])
+            # Retain imports for statically resolved name constants.
+            for i, token in enumerate(tokens):
+                if token == "import":
+                    local_tokens.extend(expression_at(i) + [";"])
+            return _js_tool_registry_names(expr, local_tokens, filename, sources, frozenset())
+        if not re.fullmatch(r"[A-Za-z_$][\w$]*", expr[0]):
+            return []
+        name = expr[0]
+        if len(expr) > 1:
+            if expr[1] != "(":
+                return []
+            candidates = [f for f in functions if f[0] == name and visible(f[1], pos)]
+            if len(candidates) != 1:
+                return []
+            _, _, body, end, _ = candidates[0]
+            # Only direct returns from the factory body, not nested callbacks.
+            return [n for j in range(body + 1, end)
+                    if tokens[j] == "return" and scopes[j] == scopes[body] + (body,)
+                    for n in follow(expression_at(j + 1), j)]
+        for param, start, end, collection, where in reversed(iterations):
+            if param == name and start <= pos < end:
+                return follow(collection, where)
+        owners = [f for f in functions if f[2] < pos < f[3]]
+        owner = max(owners, key=lambda f: f[2]) if owners else None
+        candidates = [(decl, value) for var, decl, value in declarations
+                      if var == name and decl < pos and visible(decl, pos)
+                      and (owner is None or name not in owner[4] or decl > owner[2])]
+        if candidates:
+            decl, value = max(candidates, key=lambda d: (len(scopes[d[0]]), d[0]))
+            return follow(expression_at(value), value)
+        if owner and name in owner[4]:
+            param_index = owner[4].index(name)
+            names = []
+            for j, token in enumerate(tokens):
+                if (token != owner[0] or j == owner[1] or tokens[j + 1:j + 2] != ["("]
+                        or tokens[max(0, j - 1):j] == ["."] or not visible(owner[1], j)):
+                    continue
+                args = list(_js_parts(_js_group(tokens, j + 1)))
+                if param_index < len(args):
+                    names.extend(follow(args[param_index], j))
+            return names
+        return []
+
+    for i, token in enumerate(tokens):
+        if (token == "registerTool" and tokens[max(0, i - 1):i] == ["."]
+                and tokens[i + 1:i + 2] == ["("]):
+            arg = next(_js_parts(_js_group(tokens, i + 1)), [])
+            yield i, trace(arg, i)
+
+
+def _detect_webmcp_tool_definitions(source_lines, filename, sources):
+    """Confirm tool objects connected to registration by bounded local flow."""
+    source = "\n".join(source_lines)
+    if not _WEBMCP_REGISTER_TOOL_RE.search(source):
+        return []
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    hits, seen_names = [], set()
+
+    def add(name, pos):
+        if name and name not in seen_names:
+            seen_names.add(name)
+            hits.append({
+                "name": name, "framework": "MCP SDK",
+                "line": source.count("\n", 0, pos) + 1,
+                "matched_call": "registerTool(",
+            })
+
+    for i, names in _js_registration_names(tokens, filename, sources or {}):
+        for name in names:
+            add(name, matches[i].start())
+
+    return hits
+
+
+def _detect_js_registry_tool_definitions(source_lines, filename, sources):
+    """Confirm the catalog value served in an MCP handler, following imports
+    and registry projections, or a named registry used in a marked lookup.
+    Markers in comments and unused/sibling registries do not establish usage.
+    """
+    source = "\n".join(source_lines)
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    executable = " ".join(tokens)
+    if not _MCP_DISPATCH_MARKER_RE.search(executable):
+        return []
+    hits, seen_names = [], set()
+    for i, m in enumerate(matches):
+        ident = m.group()
+        # Follow the actual catalog value, including imported projections such
+        # as TOOL_LIST_RESPONSE = TOOL_REGISTRY.map(...). No sibling-file marker
+        # search: only the value served by the handler establishes this link.
+        catalog_value = tokens[max(0, i - 2):i] == ["tools", ":"]
+        lookup = (_JS_TOOL_REGISTRY_NAME_RE.fullmatch(ident)
+                  and tokens[i + 1:i + 4] == [".", "find", "("])
+        if not (catalog_value or lookup):
+            continue
+        for name in _js_tool_registry_names([ident], tokens, filename, sources or {}, frozenset()):
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            hits.append({
+                "name": name, "framework": "MCP SDK",
+                "line": source.count("\n", 0, m.start()) + 1,
+                "matched_call": ident,
+            })
+    return hits
 
 
 # HTTP-agent option hints for otherwise unresolved constructors.
