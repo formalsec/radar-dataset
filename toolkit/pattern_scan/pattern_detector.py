@@ -1191,7 +1191,10 @@ _TOOL_DEFINITION_MARKER_PATTERN = re.compile(
     r"\bBaseTool\b|\bFunctionTool\s*\(|\bQueryEngineTool\s*\(|"
     r"\bStructuredTool\.from_function\s*\(|"
     r"\bnew\s+DynamicStructuredTool\s*\(|\bnew\s+DynamicTool\s*\(|"
-    r"\bcreateTool\s*\(|\buseCopilotAction\s*\("
+    r"\bcreateTool\s*\(|\buseCopilotAction\s*\(|"
+    r"\bregisterTool\s*\(|\bserver\.tool\s*\(|"
+    r"\bserver\.setRequestHandler\s*\(\s*ListToolsRequestSchema|"
+    r"\bserver\.setRequestHandler\s*\(\s*CallToolRequestSchema"
 )
 
 
