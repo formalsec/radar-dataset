@@ -86,8 +86,26 @@ GitHub unauthenticated access is limited to ~60 requests per hour, which is not 
 The crawler configuration lives in crawler/src/config.py. It defines the language scopes, search queries, and repository-selection thresholds.
 
 ```bash
-python crawler/src/crawler.py
+python main.py --group <group_name> --target <number> [--token TOKEN]
 ```
+
+| Flag | Description |
+|---|---|
+| `--group` | **Required.** Query group to run (see below for options) |
+| `--target` | Number of repos to find (default: see `DEFAULT_TARGET_REPOS` in `config.py`) |
+| `--token` | GitHub API token (optional if `GITHUB_TOKEN` env var is set) |
+| `--list-groups` | List available query groups and exit |
+
+### Query groups
+
+| Group | Description |
+|---|---|
+| `agent_frameworks` | Broad, generic agent-related terms (e.g. "agent", "autonomous agent") |
+| `specific_frameworks` | Named, well-known agent frameworks (e.g. LangChain, AutoGen, CrewAI) |
+| `multi_agent` | Terms specific to multi-agent systems and orchestration |
+| `comprehensive` | Union of the broad and specific terms above — widest coverage, most overlap/duplicates |
+
+Run `python main.py --list-groups` to see the exact query strings in each group.
 
 The crawler writes intermediate results into timestamped directories under crawler/output/crawl_results_*/ and retains the repositories that pass both the language and framework filters. Its persistent dataset state is stored under dataset/.
 
