@@ -67,6 +67,8 @@ MODULE_TO_FRAMEWORK = {
     "anthropic": "Anthropic SDK",
     "google": "Google GenAI",  # covers google.genai / google.generativeai -- see MODULE_SUBPATH_TO_FRAMEWORK for google.adk
     "together": "Together SDK",
+    "groq": "Groq SDK",
+    "mistralai": "Mistral SDK",
     "instructor": "Instructor",
     "playwright": "Playwright",
     "browser_use": "Browser-use",
@@ -1003,8 +1005,17 @@ def _is_non_agent_compile_call(func_node, import_aliases):
 LLM_CLIENT_CONSTRUCTORS = {
     "OpenAI": "OpenAI SDK",
     "AsyncOpenAI": "OpenAI SDK",
+    "AzureOpenAI": "OpenAI SDK",
+    "AsyncAzureOpenAI": "OpenAI SDK",
     "Anthropic": "Anthropic SDK",
     "AsyncAnthropic": "Anthropic SDK",
+    # Provider SDKs; Mistral request paths are handled separately below.
+    "Groq": "Groq SDK",
+    "AsyncGroq": "Groq SDK",
+    "Mistral": "Mistral SDK",  # mistralai v1+ client class (was MistralClient pre-1.0)
+    "MistralClient": "Mistral SDK",
+    "Together": "Together SDK",
+    "AsyncTogether": "Together SDK",
 }
 
 # Option A: tools are only reliably detectable for a CUSTOM (non-tracked-
@@ -1014,6 +1025,10 @@ LLM_CLIENT_CONSTRUCTORS = {
 # all. This is confirmed the same way as everything else: the receiving
 # client must trace back to a real OpenAI/Anthropic SDK import.
 LLM_TOOL_CALL_METHODS = {"create", "stream"}  # .chat.completions.create(, .messages.create(, .messages.stream(
+
+def _llm_constructor_name(func, import_aliases):
+    canonical = _canonical_call_text(func, import_aliases)
+    return canonical[:-1].rsplit(".", 1)[-1] if canonical else _callee_simple_name(func)
 
 
 def _build_llm_client_factory_functions(tree, import_aliases):
@@ -1036,9 +1051,7 @@ def _build_llm_client_factory_functions(tree, import_aliases):
             if not (isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call)):
                 continue
             call = stmt.value
-            name = (call.func.id if isinstance(call.func, ast.Name)
-                    else call.func.attr if isinstance(call.func, ast.Attribute)
-                    else None)
+            name = _llm_constructor_name(call.func, import_aliases)
             if name not in LLM_CLIENT_CONSTRUCTORS:
                 continue
             call_frameworks = _frameworks_for_call_identifier(call.func, import_aliases)
@@ -1545,7 +1558,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # `.chat.completions.create(tools=...)` on it can be trusted as
             # genuine tool-calling evidence rather than a guess. Same
             # per-identifier import confirmation as everything else here.
-            llm_client_name = _callee_simple_name(callee)
+            llm_client_name = _llm_constructor_name(callee, import_aliases)
             if llm_client_name in LLM_CLIENT_CONSTRUCTORS and LLM_CLIENT_CONSTRUCTORS[llm_client_name] in call_frameworks:
                 pending_llm_clients[id(node)] = {
                     "framework": LLM_CLIENT_CONSTRUCTORS[llm_client_name],
@@ -1821,11 +1834,15 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 "matched_call": matched_call, "tool_names": _extract_bind_tools_names(node),
             })
             continue
-        if node.func.attr not in LLM_TOOL_CALL_METHODS:
-            continue
         base_var = _resolve_identity(node.func)
         framework = llm_client_framework_by_var.get(base_var)
         if framework is None:
+            continue
+        request_path = _resolve_expr_text(node.func)[len(base_var) + 1:]
+        if framework == "Mistral SDK":
+            if request_path not in {"chat.complete", "chat.complete_async", "chat.stream", "chat.stream_async"}:
+                continue
+        elif node.func.attr not in LLM_TOOL_CALL_METHODS:
             continue
         tools_kwarg = next((kw.value for kw in node.keywords if kw.arg == "tools"), None)
         if tools_kwarg is None:
