@@ -1269,6 +1269,15 @@ def _js_tools(expression, tokens, filename, sources, seen=frozenset()):
     return [] if is_call else [name]
 
 
+# HTTP-agent option hints for otherwise unresolved constructors.
+# Known HTTP imports are excluded independently of their options.
+_UNDICI_AGENT_OPTION_KEYS = {
+    "headersTimeout", "bodyTimeout", "connect", "pipelining",
+    "keepAliveTimeout", "keepAliveMaxTimeout", "connections", "factory",
+    "maxHeaderSize", "maxResponseSize",
+}
+
+
 def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs_by_fw,
                             filename="", javascript_sources=None):
     if agent_creation_category is None:
@@ -1283,11 +1292,16 @@ def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs
             code[m.start():m.end()] = m.group()
     code = "".join(code)
     has_mastra_agent = False
+    has_http_agent = False
     for i, token in enumerate(tokens):
         if token != "import" or tokens[i + 1:i + 2] != ["{"]:
             continue
         imports = _js_group(tokens, i + 1)
         tail = tokens[i + len(imports) + 3:i + len(imports) + 5]
+        if (len(tail) == 2 and tail[0] == "from"
+                and tail[1][1:-1] in {"undici", "http", "https", "node:http", "node:https"}
+                and any(part[-1:] == ["Agent"] for part in _js_parts(imports))):
+            has_http_agent = True
         if (len(tail) == 2 and tail[0] == "from"
                 and tail[1][1:-1] in ("@mastra/core", "@mastra/core/agent")
                 and any(part == ["Agent"] for part in _js_parts(imports))):
@@ -1302,8 +1316,7 @@ def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs
             continue
         if "(" not in pattern_str:
             continue
-        if label == "Mastra" and pattern_str.startswith("new Agent") and not has_mastra_agent:
-            continue
+        bare_new_agent = label == "Mastra" and pattern_str.startswith("new Agent")
         for m in regex.finditer(code):
             opening = code.find("(", m.start(), m.end())
             if opening not in call_tokens or opening in seen:
@@ -1313,8 +1326,22 @@ def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs
             seen.add(opening)
             args = _js_group(tokens, call_tokens[opening])
             options = _js_group(args, 0) if args[:1] == ["{"] else []
+            hit_label = label
+            if bare_new_agent and has_http_agent:
+                continue
+            if bare_new_agent and not has_mastra_agent:
+                # Inspect all arguments: AI configuration can be positional,
+                # shorthand, or nested under initialState. String/comment text
+                # does not match these exact identifier tokens.
+                if any(_js_property(options, key) for key in _UNDICI_AGENT_OPTION_KEYS):
+                    continue
+                if not set(args).intersection({
+                        "model", "modelId", "tools", "systemPrompt", "system",
+                        "instructions", "messages", "provider", "providerId", "apiKey"}):
+                    continue
+                hit_label = "Custom"
             hits.append({
-                "name": None, "framework": label,
+                "name": None, "framework": hit_label,
                 "line": source.count("\n", 0, m.start()) + 1,
                 "matched_call": m.group().strip(),
                 "tools_bound": _js_tools(_js_property(options, "tools"), tokens,
