@@ -1111,6 +1111,40 @@ def _build_llm_client_factory_functions(tree, import_aliases):
     return factories
 
 
+def _build_llm_client_wrapper_classes(tree, import_aliases):
+    """Map local wrapper classes whose ``__init__`` creates an SDK client.
+
+    This is deliberately limited to one hop and to the constructor body: a
+    local class is only treated as an LLM client when its own initialization
+    contains a confirmed SDK constructor.  That lets callers use a wrapper
+    object through an SDK-shaped interface without promoting arbitrary
+    ``*Client``/``*Agent`` classes to LLM clients.
+    """
+    wrappers = {}
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        init = next(
+            (node for node in cls.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node.name == "__init__"),
+            None,
+        )
+        if init is None:
+            continue
+        for node in ast.walk(init):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _llm_constructor_name(node.func, import_aliases)
+            framework = LLM_CLIENT_CONSTRUCTORS.get(name)
+            if framework is None:
+                continue
+            if framework in _frameworks_for_call_identifier(node.func, import_aliases):
+                wrappers[cls.name] = framework
+                break
+    return wrappers
+
+
 def _build_llm_env_var_classes(tree):
     """Map local classes with provider-key lookups to candidate providers."""
     providers = {}
@@ -1877,6 +1911,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
         tree, agent_creation_category, rag_creation_category, import_aliases
     )
     llm_client_factory_functions = _build_llm_client_factory_functions(tree, import_aliases)
+    llm_client_wrapper_classes = _build_llm_client_wrapper_classes(tree, import_aliases)
     llm_env_var_classes = _build_llm_env_var_classes(tree)
 
     lines = []
@@ -2000,6 +2035,11 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             elif llm_client_name in llm_client_factory_functions:
                 pending_llm_clients[id(node)] = {
                     "framework": llm_client_factory_functions[llm_client_name],
+                    "line": node.lineno,
+                }
+            elif llm_client_name in llm_client_wrapper_classes:
+                pending_llm_clients[id(node)] = {
+                    "framework": llm_client_wrapper_classes[llm_client_name],
                     "line": node.lineno,
                 }
             else:
