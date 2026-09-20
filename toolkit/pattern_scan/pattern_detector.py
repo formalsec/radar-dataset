@@ -1662,7 +1662,9 @@ def _detect_webmcp_tool_definitions(source_lines, filename, sources):
         if name and name not in seen_names:
             seen_names.add(name)
             hits.append({
-                "name": name, "framework": "MCP SDK",
+                # registerTool is shared by WebMCP, Pi, OpenClaw and others;
+                # the method name confirms no particular framework.
+                "name": name, "framework": None,
                 "line": source.count("\n", 0, pos) + 1,
                 "matched_call": "registerTool(",
             })
