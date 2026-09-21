@@ -35,6 +35,9 @@
           "Agent(",
           "from browser_use import Agent"
         ],
+        "CAMEL": [
+          "ChatAgent("
+        ],
         "CopilotKit": [
           "<CopilotKit",
           "@copilotkit/react-core",
@@ -162,6 +165,9 @@
           "python"
         ],
         "Browser-use": [
+          "python"
+        ],
+        "CAMEL": [
           "python"
         ],
         "CopilotKit": [

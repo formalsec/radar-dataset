@@ -1,9 +1,6 @@
 # Agent Creation Patterns
 
-Scope: restricted to frameworks listed in Table II of the RADAR paper (39 frameworks
-across Orchestration, LLM SDKs, Memory & RAG, Tool Use, Protocols). Frameworks not in
-Table II (e.g. Microsoft Agent Framework, Genkit, FlowiseAI, Husk, Veryfront) have been
-removed from this file — add them to Table II first if they should be tracked.
+Scope: Table II frameworks plus CAMEL. Counts include bundled-library creation sites.
 
 ## Detection Methods
 
@@ -22,6 +19,7 @@ removed from this file — add them to Table II first if they should be tracked.
 |-----------|-------------------|
 | **Agno** | `from agno.agent import Agent`<br>`agno\.Agent`<br>`Agent(`<br>`Team(`<br>`Workflow(`<br>`@agent`<br>`@crew`<br>`@tool`<br>`.run(`<br>`.arun(` |
 | **Browser-use** | `Agent(` *(confirmed via `from browser_use import Agent`, same import-confirmation mechanism as every other bare "Agent(" row)* |
+| **CAMEL** | `ChatAgent(` *(import-confirmed)* |
 | **LangChain** | `create_agent(`<br>`create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`create_pandas_dataframe_agent(`<br>`create_sql_agent(`<br>`initialize_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
 | **LangGraph** | `StateGraph(`<br>`MessageGraph(`<br>`.add_node(`<br>`.compile(`<br>`create_react_agent(` |
 | **CrewAI** | `Agent(`<br>`@agent`<br>`@crew`<br>`Process.sequential`<br>`Process.hierarchical` |

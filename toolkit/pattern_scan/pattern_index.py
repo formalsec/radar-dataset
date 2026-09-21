@@ -10,7 +10,7 @@ MASTER_FRAMEWORKS = [
     "LangChain", "LangGraph", "LlamaIndex", "CrewAI", "AutoGen", "Mastra",
     "Vercel AI SDK", "ElizaOS", "Bee Agent Framework", "Smolagents",
     "Pydantic AI", "Agno", "Haystack", "OpenAI Agents SDK", "Deep Agents",
-    "Google ADK",
+    "Google ADK", "CAMEL",
     "OpenAI SDK", "Anthropic SDK", "Google GenAI", "Together SDK",
     "Instructor", "js-agent", "CopilotKit",
     "Mem0", "Chroma", "Weaviate", "Qdrant", "Pinecone", "Zep", "PGVector", "Milvus",

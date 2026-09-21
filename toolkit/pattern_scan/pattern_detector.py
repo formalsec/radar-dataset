@@ -55,6 +55,7 @@ MODULE_TO_FRAMEWORK = {
     "agents": "OpenAI Agents SDK",
     "beeai_framework": "Bee Agent Framework", "bee_agent_framework": "Bee Agent Framework",
     "deepagents": "Deep Agents",
+    "camel": "CAMEL",
     "chromadb": "Chroma",
     "qdrant_client": "Qdrant",
     "pinecone": "Pinecone",
@@ -742,7 +743,7 @@ def _wrapping_call_framework(call_node, var_name, prelim_framework_by_var):
     return prelim_framework_by_var.get(receiver)
 
 
-def _tool_element_identifier(elt):
+def _tool_element_identifier(elt, import_aliases=None):
     """Best-effort identifier for one element of a `tools=[...]` list: a bare
     name (`search_tool`) or a tool-factory call (`get_search_ddg_tool()`) --
     the latter is the dominant real shape for repos that build each Tool via
@@ -750,7 +751,14 @@ def _tool_element_identifier(elt):
     `tools = [get_search_ddg_tool(), get_fetch_page_tool()]`."""
     if isinstance(elt, ast.Name):
         return elt.id
+    if isinstance(elt, ast.Attribute):
+        return elt.attr
     if isinstance(elt, ast.Call):
+        canonical = _canonical_call_text(elt.func, import_aliases or {}) or ""
+        if canonical.startswith("camel.toolkits.") and canonical.endswith(".FunctionTool("):
+            wrapped = elt.args[0] if elt.args else next(
+                (kw.value for kw in elt.keywords if kw.arg == "func"), None)
+            return _tool_element_identifier(wrapped, import_aliases)
         func = elt.func
         if isinstance(func, ast.Name):
             return func.id
@@ -776,20 +784,21 @@ _POSITIONAL_TOOLS_ARG_INDEX = {
 }
 
 
-def _resolve_tools_value(value, assigns_by_func_and_name, func_ctx):
+def _resolve_tools_value(value, assigns_by_func_and_name, func_ctx, import_aliases=None):
     """Resolve a local tool list or tuple through one assignment."""
     if isinstance(value, ast.Name) and assigns_by_func_and_name is not None:
         value = assigns_by_func_and_name.get((func_ctx, value.id), value)
     if isinstance(value, (ast.List, ast.Tuple)):
-        return [name for name in (_tool_element_identifier(e) for e in value.elts) if name]
+        return [name for name in (_tool_element_identifier(e, import_aliases) for e in value.elts) if name]
     return None
 
 
-def _extract_tools_bound(call_node, assigns_by_func_and_name=None, func_ctx=None, callee_name=None):
+def _extract_tools_bound(call_node, assigns_by_func_and_name=None, func_ctx=None, callee_name=None,
+                         import_aliases=None):
     """Extract tools from keywords, literal kwargs, or known positional arguments."""
     for kw in call_node.keywords:
         if kw.arg == "tools":
-            names = _resolve_tools_value(kw.value, assigns_by_func_and_name, func_ctx)
+            names = _resolve_tools_value(kw.value, assigns_by_func_and_name, func_ctx, import_aliases)
             if names is not None:
                 return names
         elif kw.arg is None:
@@ -797,13 +806,13 @@ def _extract_tools_bound(call_node, assigns_by_func_and_name=None, func_ctx=None
             if isinstance(source, ast.Name) and assigns_by_func_and_name is not None:
                 source = assigns_by_func_and_name.get((func_ctx, source.id))
             names = _resolve_tools_value(_dict_value_for_key(source, "tools"),
-                                          assigns_by_func_and_name, func_ctx)
+                                          assigns_by_func_and_name, func_ctx, import_aliases)
             if names is not None:
                 return names
 
     idx = _POSITIONAL_TOOLS_ARG_INDEX.get(callee_name)
     if idx is not None and len(call_node.args) > idx:
-        names = _resolve_tools_value(call_node.args[idx], assigns_by_func_and_name, func_ctx)
+        names = _resolve_tools_value(call_node.args[idx], assigns_by_func_and_name, func_ctx, import_aliases)
         if names is not None:
             return names
     return []
@@ -1990,6 +1999,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     "line": node.lineno,
                     "tools_bound": _extract_tools_bound(
                         node, assigns_by_func_and_name, func_ctx, callee_name=_callee_simple_name(callee),
+                        import_aliases=import_aliases,
                     ),
                     "call_node": node,
                     "matched_call": call_text,  # e.g. "SolidAssistantAgent(" -- so you can eyeball-confirm the match
