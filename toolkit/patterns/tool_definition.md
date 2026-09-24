@@ -1,7 +1,7 @@
 # Tool Definition Patterns
 
 Python decorators and constructors feed confirmed tool counts through framework
-resolution. Most JS/TS definitions remain unconfirmed markers, EXCEPT the two
+resolution. Most JS/TS definitions remain unconfirmed markers, EXCEPT the three
 shapes documented under "Confirmed JS/TS Detection" below, which are wired into
 `n_tools` the same way Python's decorators/constructors are. Server construction
 and MCP request handlers are not individual tool definitions.
@@ -77,9 +77,9 @@ from browser_use import Controller
 
 ## Confirmed JS/TS Detection
 
-Two shapes, implemented in `pattern_detector.py`, are confirmed the same way
+Three shapes, implemented in `pattern_detector.py`, are confirmed the same way
 Python's decorators/constructors are (they feed `n_tools`, not just the
-unconfirmed marker tier). Both require an actual usage context, not object
+unconfirmed marker tier). All three require an actual usage context, not object
 shape alone -- see `WORLDMONITOR_TOOL_DETECTION.md` for the finding that
 motivated this (a real MCP server whose tools were plain objects, not
 decorators/constructors, and were completely invisible).
@@ -87,6 +87,7 @@ decorators/constructors, and were completely invisible).
 | Pattern | Confirming context | Notes |
 |---------|--------------------|-------|
 | Plain-object MCP tool registry (`{name, description, inputSchema}`) | A `tools:` catalog value or named registry lookup in a file with a non-comment MCP dispatch marker | Follows the served value through bindings, relative imports, spreads and catalog projections such as `TOOL_LIST_RESPONSE = TOOL_REGISTRY.map(...)`. The registry need not be declared in the handler file. Unused and unrelated sibling registries do not qualify. |
+| MCP SDK server registration (`server.tool("name", ...)`, `server.registerTool("name", ...)`) | Same-file `@modelcontextprotocol/*` import or `require` | Name must be a string literal or same-file `const`; dynamic names stay unconfirmed. |
 | WebMCP tool registration (`provider.registerTool(tool, ...)`) | The call's argument resolves to a tool object, directly or through bounded local data flow | Follows scoped bindings, named wrapper parameters, parenthesized `map`/`forEach` callbacks, braced `for (const tool of tools)` loops and factory returns, up to 12 hops. Resolves local/imported name constants, including `Object.freeze({...})`. Unconnected arrays and unsupported expressions remain unconfirmed. |
 
 Shape check for both (`_js_tool_def_object_name`): requires a `name` key

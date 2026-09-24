@@ -370,6 +370,7 @@ class PatternDetector:
             confirmed_tool_definitions = (
                 _detect_webmcp_tool_definitions(source_lines, filename, javascript_sources)
                 + _detect_js_registry_tool_definitions(source_lines, filename, javascript_sources)
+                + _detect_js_mcp_server_tool_definitions(source_lines)
             )
 
         result = FileResult(
@@ -1756,6 +1757,62 @@ def _detect_js_registry_tool_definitions(source_lines, filename, sources):
                 "line": source.count("\n", 0, m.start()) + 1,
                 "matched_call": ident,
             })
+    return hits
+
+
+# MCP SDK `server.tool("name", ...)`/`server.registerTool("name", ...)`:
+# requires an MCP SDK import and a static string name.
+_JS_MCP_SDK_MODULE_RE = re.compile(r"^['\"`]@modelcontextprotocol/")
+_JS_MCP_SERVER_TOOL_METHODS = {"tool", "registerTool"}
+
+
+def _js_string_value(token):
+    """A string literal token's value, or None if interpolated."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"`":
+        if token[0] == "`" and "${" in token:
+            return None
+        return token[1:-1]
+    return None
+
+
+def _detect_js_mcp_server_tool_definitions(source_lines):
+    """Confirm MCP SDK tool registrations with a literal or same-file const name."""
+    source = "\n".join(source_lines)
+    if "@modelcontextprotocol/" not in source:
+        return []
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    if not any(
+        _JS_MCP_SDK_MODULE_RE.match(token)
+        and (tokens[i - 1:i] in (["from"], ["import"]) or tokens[max(0, i - 2):i] == ["require", "("])
+        for i, token in enumerate(tokens)
+    ):
+        return []
+    constants = {}
+    for i, token in enumerate(tokens):
+        if token == "const" and tokens[i + 2:i + 3] == ["="] and tokens[i + 4:i + 5] in ([";"], [","], []):
+            value = _js_string_value(tokens[i + 3]) if i + 3 < len(tokens) else None
+            if value is not None:
+                constants.setdefault(tokens[i + 1], value)
+    hits, seen_names = [], set()
+    for i, token in enumerate(tokens):
+        if (token not in _JS_MCP_SERVER_TOOL_METHODS or tokens[i - 1:i] != ["."]
+                or tokens[i + 1:i + 2] != ["("]):
+            continue
+        first = next(_js_parts(_js_group(tokens, i + 1)), [])
+        if len(first) != 1:
+            continue
+        name = _js_string_value(first[0])
+        if name is None:
+            name = constants.get(first[0])
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        hits.append({
+            "name": name, "framework": "MCP SDK",
+            "line": source.count("\n", 0, matches[i].start()) + 1,
+            "matched_call": f"{token}(",
+        })
     return hits
 
 
