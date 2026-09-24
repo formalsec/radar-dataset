@@ -2440,6 +2440,27 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                             "line": getattr(dec, "lineno", node.lineno),
                             "matched_call": dec_text,
                         })
+            if tool_definition_category is not None and isinstance(node, ast.ClassDef):
+                # `class X(BaseTool): name = "x"` -- base confirmed by import.
+                tool_name = next((
+                    stmt.value.value for stmt in node.body
+                    if isinstance(stmt, (ast.Assign, ast.AnnAssign))
+                    and any(isinstance(t, ast.Name) and t.id == "name"
+                            for t in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]))
+                    and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)
+                ), None)
+                for base in node.bases if tool_name else []:
+                    base_text = _resolve_expr_text(base)
+                    base_fw = _match_constructor_text(
+                        base_text, tool_definition_category,
+                        _frameworks_for_call_identifier(base, import_aliases),
+                    )
+                    if base_fw is not None:
+                        confirmed_tool_definitions.append({
+                            "framework": base_fw, "name": tool_name,
+                            "line": node.lineno, "matched_call": base_text,
+                        })
+                        break
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             lines.append(node.value)
         elif isinstance(node, ast.Assign):

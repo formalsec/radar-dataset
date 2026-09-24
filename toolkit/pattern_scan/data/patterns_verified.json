@@ -931,6 +931,7 @@
         ],
         "LangChain": [
           "@tool",
+          "BaseTool",
           "StructuredTool.from_function(",
           "from langchain.tools import tool",
           "from langchain_core.tools import tool",

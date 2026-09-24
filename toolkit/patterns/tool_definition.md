@@ -12,7 +12,7 @@ and MCP request handlers are not individual tool definitions.
 
 | Framework | Detection Patterns |
 |-----------|-------------------|
-| **LangChain** | `@tool`<br>`StructuredTool.from_function(`<br>`from langchain_core.tools import tool`<br>`from langchain.tools import tool` |
+| **LangChain** | `@tool`<br>`BaseTool`<br>`StructuredTool.from_function(`<br>`from langchain_core.tools import tool`<br>`from langchain.tools import tool` |
 | **CrewAI** | `@tool`<br>`BaseTool`<br>`from crewai.tools import tool`<br>`from crewai_tools import tool` |
 | **OpenAI Agents SDK** | `@function_tool`<br>`FunctionTool(`<br>`from agents import function_tool` |
 | **Agno** | `@tool` |
