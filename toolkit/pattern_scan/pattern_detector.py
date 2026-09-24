@@ -1260,14 +1260,46 @@ def _scan_line_markers(source_lines, pattern):
 # tool extraction balance nested object literals without a JS parser dependency.
 _JS_TOKEN_RE = re.compile(
     r"//[^\n]*|/\*.*?\*/|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|"
-    r"`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|\.\.\.|[^\s]", re.DOTALL,
+    r"`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|\.\.\.|\+\+|--|[^\s]", re.DOTALL,
 )
+_JS_REGEX_RE = re.compile(r"/(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\\\[\r\n])+/[a-z]*")
+_JS_EXPRESSION_PREFIXES = {
+    "(", "[", "{", ",", ";", ":", "=", "!", "?", "&", "|", "+", "-", "*", "/", "%",
+    "~", "^", "<", ">", "return", "throw", "case", "yield", "await", "void", "typeof",
+    "delete", "in", "instanceof", "else", "do",
+}
 _JS_GRAPH_COMPILE_CONTEXT_RE = re.compile(r"StateGraph\s*\(|\.addNode\s*\(")
 
 
 def _js_tokens(source):
-    return [m for m in _JS_TOKEN_RE.finditer(source)
-            if not m.group().startswith(("//", "/*"))]
+    matches, parens, braces = [], [], []
+    position, regex_allowed = 0, True
+    while (match := _JS_TOKEN_RE.search(source, position)) is not None:
+        token = match.group()
+        position = match.end()
+        if token.startswith(("//", "/*")):
+            continue
+        # A slash after an operand is division; in an expression-start position
+        # a complete regex is one opaque token, including escapes/character classes.
+        if token == "/" and regex_allowed:
+            literal = _JS_REGEX_RE.match(source, match.start())
+            if literal:
+                match, token, position = literal, literal.group(), literal.end()
+        previous = matches[-1].group() if matches else ""
+        if token == "(":
+            parens.append(previous in {"if", "for", "while", "with", "switch", "catch"}
+                          or (previous == "await" and len(matches) > 1
+                              and matches[-2].group() == "for"))
+        if token == "{":
+            braces.append(previous in {"", ";", "{", "}", ")", "else", "do", "try", "finally"})
+        if token == ")":
+            regex_allowed = parens.pop() if parens else False
+        elif token == "}":
+            regex_allowed = braces.pop() if braces else False
+        else:
+            regex_allowed = token in _JS_EXPRESSION_PREFIXES and previous != "."
+        matches.append(match)
+    return matches
 
 
 def _js_parts(tokens):
@@ -1738,7 +1770,7 @@ def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs
     # Preserve offsets and line numbers while hiding non-code evidence.
     code = list(re.sub(r"[^\n]", " ", source))
     for m in matches:
-        if not m.group().startswith(("'", '\"', "`")):
+        if not m.group().startswith(("'", '\"', "`", "/")):
             code[m.start():m.end()] = m.group()
     code = "".join(code)
     has_mastra_agent = False
