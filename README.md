@@ -134,27 +134,23 @@ python crawler/src/repoClassifierGPT.py \
 
 The scripts accept `--limit` and `--resume` options and write aggregate counts together with model reasoning and errors.
 
-### 3) Download the corpus repositories
+### 3) Run the static scanner
 
-Use the fetcher to download repository source code for the retained application set.
-
-```bash
-python toolkit/src/github_fetcher.py <repo_list_file> <dest_dir> [--token TOKEN] [--max-workers N]
-```
-
-Example:
-
-```bash
-python toolkit/src/github_fetcher.py crawler/output/crawl_results_YYYYMMDD_HHMMSS/passed_urls.txt ./repos --max-workers 8
-```
-
-### 4) Run the static scanner
-
-The scanner takes a JSON manifest of repositories (for example, the downloaded corpus or a filtered subset) and then analyzes the referenced repository source code to emit structured findings per repository.
+The scanner takes a JSON manifest of repositories (for example, a corpus or filtered subset) and analyzes the referenced repository source code to emit structured findings per repository.
 
 ```bash
 python -m toolkit.src.scan_api <repos_json> [output_file] [--patterns FILE] [--token TOKEN] [--max-file-size BYTES] [--limit N] [--gc-every N]
 ```
+
+| Argument | Description |
+|---|---|
+| `<repos_json>` | **Required.** Path to the JSON manifest listing repositories to scan |
+| `[output_file]` | Optional path for the scanner output; defaults to a timestamped file under `toolkit/output/scan_results/` |
+| `--patterns FILE` | Custom pattern-definition file to use instead of the default definitions |
+| `--token TOKEN` | GitHub API token for authenticated metadata lookups when needed |
+| `--max-file-size BYTES` | Skip files larger than this size during analysis |
+| `--limit N` | Process only the first `N` repositories in the manifest |
+| `--gc-every N` | Trigger garbage collection every `N` repositories to reduce memory pressure |
 
 Example:
 
@@ -170,8 +166,6 @@ The scanner produces records with repository summaries and evidence. Typical fie
 - status, error, scanned_at
 - radar_summary with values such as n_agents, n_tools, has_rag, shared_across_agents, rag_writers, rag_readers, unsanitized_writes
 - findings_by_file and other traceable evidence for each repository
-
-The fetcher also writes a manifest with repository metadata such as URL, local path, status, and GitHub metadata when available.
 
 ## Pattern definitions
 
