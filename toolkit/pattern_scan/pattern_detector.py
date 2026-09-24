@@ -66,6 +66,8 @@ MODULE_TO_FRAMEWORK = {
     "zep_python": "Zep", "zep_cloud": "Zep",
     "openai": "OpenAI SDK",
     "anthropic": "Anthropic SDK",
+    "claude_agent_sdk": "Claude Agent SDK",
+    "claude_code_sdk": "Claude Agent SDK",
     "google": "Google GenAI",  # covers google.genai / google.generativeai -- see MODULE_SUBPATH_TO_FRAMEWORK for google.adk
     "together": "Together SDK",
     "groq": "Groq SDK",
@@ -976,6 +978,12 @@ def _frameworks_for_call_identifier(func_node, import_aliases):
     else:
         return set()
     fw = _resolve_module_framework(canonical)
+    if fw == "Claude Agent SDK" and _canonical_call_text(func_node, import_aliases) not in {
+        f"{package}.{entry}("
+        for package in ("claude_agent_sdk", "claude_code_sdk")
+        for entry in ("query", "ClaudeSDKClient")
+    }:
+        return set()  # Require the actual export and a surviving import binding.
     return {fw} if fw else set()
 
 
@@ -1760,6 +1768,224 @@ _UNDICI_AGENT_OPTION_KEYS = {
 }
 
 
+# These ordinary function names need callee-level import confirmation.
+_JS_PACKAGE_REQUIRED = {
+    "Claude Agent SDK": ("@anthropic-ai/claude-agent-sdk", "@anthropic-ai/claude-code"),
+}
+_JS_AGENT_EXPORTS = {
+    "Claude Agent SDK": {"query"},
+}
+
+# A parenthesized head belonging to one of these is control flow, not a
+# function parameter list -- `for await (const m of query({...})) {` reads
+# exactly like `(params) {` to a token scanner, and treating it as one marked
+# every binding used inside it as shadowed. That silently zeroed the Agent
+# SDK's own streaming idiom, which is how most of its call sites are written.
+_JS_CONTROL_FLOW_HEADS = {"if", "for", "while", "switch", "await"}
+
+
+def _js_sdk_agent_calls(tokens):
+    """Resolve direct SDK calls from named/namespace imports and module loads.
+
+    This deliberately handles only explicit bindings. Reassigned or shadowed
+    names are rejected conservatively throughout the file. Module-load bindings
+    are visible only in their enclosing brace scopes; this is not a full
+    JavaScript control-flow or scope resolver.
+    """
+    bindings, import_tokens, require_binding_positions = {}, set(), set()
+    pairs, scopes, stack = {}, [], []
+    for i, token in enumerate(tokens):
+        scopes.append(tuple(j for j in stack if tokens[j] == "{"))
+        if token in ("(", "[", "{"):
+            stack.append(i)
+        elif token in (")", "]", "}") and stack:
+            pairs[stack.pop()] = i
+
+    def binding_names(pattern):
+        # Only binding positions count: object keys, types and default-value
+        # expressions can refer to the SDK without declaring its name.
+        if not pattern:
+            return set()
+        if pattern[0] == "...":
+            return binding_names(pattern[1:])
+        if pattern[0] == "{":
+            names = set()
+            for part in _js_parts(_js_group(pattern, 0)):
+                if len(part) > 1 and part[1] == ":":
+                    part = part[2:]
+                names.update(binding_names(part))
+            return names
+        if pattern[0] == "[":
+            return set().union(*(binding_names(part) for part in
+                                 _js_parts(_js_group(pattern, 0))))
+        return {pattern[0]} if re.fullmatch(r"[A-Za-z_$][\w$]*", pattern[0]) else set()
+
+    def register(parts, label, position, namespace=False, commonjs=False):
+        def add(local, exported):
+            bindings.setdefault(local, []).append(
+                (label, exported, scopes[position], position))
+        if namespace:
+            if len(parts) == 1:
+                add(parts[0], None)
+            return
+        for part in _js_parts(parts):
+            separator = ":" if commonjs else "as"
+            if len(part) == 1:
+                exported = local = part[0]
+            elif len(part) == 3 and part[1] == separator:
+                exported, local = part[0], part[2]
+            else:
+                continue  # includes type-only imports
+            if exported in _JS_AGENT_EXPORTS[label]:
+                add(local, exported)
+
+    def framework(spec):
+        if not spec.startswith(("'", '"')):
+            return None
+        return next((label for label, packages in _JS_PACKAGE_REQUIRED.items()
+                     if spec[1:-1] in packages), None)
+
+    for i, token in enumerate(tokens):
+        if token == "import" and tokens[i + 1:i + 2] == ["{"]:
+            parts = _js_group(tokens, i + 1)
+            end = i + len(parts) + 3
+            if tokens[end:end + 1] == ["from"] and end + 1 < len(tokens):
+                label = framework(tokens[end + 1])
+                if label:
+                    register(parts, label, i)
+                    import_tokens.update(range(i, end + 2))
+        elif (token == "import" and tokens[i + 1:i + 3] == ["*", "as"]
+              and tokens[i + 4:i + 5] == ["from"] and i + 5 < len(tokens)):
+            label = framework(tokens[i + 5])
+            if label:
+                register([tokens[i + 3]], label, i, namespace=True)
+                import_tokens.update(range(i, i + 6))
+        elif token in {"const", "let", "var"}:
+            end = i + 2
+            parts = tokens[i + 1:i + 2]
+            destructured = parts == ["{"]
+            if destructured:
+                parts = _js_group(tokens, i + 1)
+                end = i + len(parts) + 3
+            if tokens[end:end + 1] != ["="]:
+                continue
+            load = end + 1
+            awaited = tokens[load:load + 1] == ["await"]
+            if awaited:
+                load += 1
+            if (tokens[load:load + 1] not in (["require"], ["import"])
+                    or tokens[load + 1:load + 2] != ["("]
+                    or tokens[load + 3:load + 4] != [")"]):
+                continue
+            if tokens[load] == "import" and not awaited:
+                continue  # import() yields a Promise, not the SDK namespace
+            if tokens[load + 4:load + 5] in (["."], ["["]):
+                continue  # a projected value is not the module namespace
+            label = framework(tokens[load + 2])
+            if label:
+                register(parts, label, i, namespace=not destructured, commonjs=True)
+                import_tokens.update(range(i, load + 4))
+                if tokens[load] == "require":
+                    require_binding_positions.add(i)
+
+    invalid = set()
+    declaration_names = set()
+    for i, token in enumerate(tokens):
+        if i in import_tokens:
+            continue
+        if token in {"const", "let", "var"}:
+            # Walk all declarators, jumping over initializer expressions.
+            start = i + 1
+            while start < len(tokens):
+                end = pairs.get(start, start) + 1
+                declaration_names.update(binding_names(tokens[start:end]))
+                j = end
+                while j < len(tokens) and tokens[j] not in {";", ",", ")", "}", "of", "in"}:
+                    j = pairs.get(j, j) + 1
+                if tokens[j:j + 1] != [","]:
+                    break
+                start = j + 1
+        if token in bindings and tokens[i - 1:i] != ["."]:
+            # Mutating a namespace export also removes its SDK identity.
+            if (tokens[i + 1:i + 2] == ["."]
+                    and tokens[i + 3:i + 4] == ["="]
+                    and tokens[i + 4:i + 5] not in (["="], [">"])
+                    and any(exported is None and tokens[i + 2] in _JS_AGENT_EXPORTS[label]
+                            for label, exported, _, _ in bindings[token])):
+                invalid.add(token)
+            if (tokens[i + 1:i + 2] == ["["]
+                    and tokens[i + 3:i + 5] == ["]", "="]
+                    and tokens[i + 4:i + 6] != ["=", "="]
+                    and any(exported is None and tokens[i + 2].strip("\"'") in _JS_AGENT_EXPORTS[label]
+                            for label, exported, _, _ in bindings[token])):
+                invalid.add(token)
+            if (tokens[i - 1:i] in (["function"], ["class"])
+                    or (tokens[i + 1:i + 2] == ["="]
+                        and tokens[i + 2:i + 3] != ["="])):
+                invalid.add(token)
+        if token == "(" and tokens[i - 1:i] not in ([kw] for kw in _JS_CONTROL_FLOW_HEADS):
+            end = pairs.get(i, i) + 1
+            parameter_end = end - 1
+            # TS functions/arrows may have a return annotation before their
+            # body. Do not mistake a typed shadow parameter for an SDK import.
+            if tokens[end:end + 1] == [":"]:
+                end += 1
+                angle = 0
+                while end < len(tokens):
+                    if angle == 0 and (tokens[end] in {"{", ";", "}"}
+                                       or tokens[end:end + 2] == ["=", ">"]):
+                        break
+                    angle += (tokens[end] == "<") - (tokens[end] == ">")
+                    end = pairs.get(end, end) + 1
+            if tokens[end:end + 1] == ["{"] or tokens[end:end + 2] == ["=", ">"]:
+                for part in _js_parts(tokens[i + 1:parameter_end]):
+                    declaration_names.update(binding_names(part))
+    invalid.update(declaration_names.intersection(bindings))
+    # require() can itself be a parameter/local function. A call to that
+    # replacement is not evidence that Node loaded the named SDK package.
+    if "require" in declaration_names or any(
+            token == "require" and (tokens[i - 1:i] == ["function"]
+                                    or tokens[i + 1:i + 2] == ["="])
+            for i, token in enumerate(tokens)):
+        for local, entries in bindings.items():
+            if any(position in require_binding_positions
+                   for _, _, _, position in entries):
+                invalid.add(local)
+
+    calls = {}
+    for i, token in enumerate(tokens):
+        if token not in bindings or token in invalid or i in import_tokens:
+            continue
+        if tokens[max(0, i - 1):i] in (["."], ["function"], ["new"]):
+            continue
+        visible = [binding for binding in bindings[token]
+                   if scopes[i][:len(binding[2])] == binding[2]
+                   and (tokens[binding[3]] == "import" or binding[3] < i)]
+        if not visible:
+            continue
+        label, exported, _, _ = max(visible, key=lambda binding: (len(binding[2]), binding[3]))
+        opening = i + 1
+        if exported is None:
+            if (tokens[i + 1:i + 2] != ["."] or i + 2 >= len(tokens)
+                    or tokens[i + 2] not in _JS_AGENT_EXPORTS[label]):
+                continue
+            opening = i + 3
+        if tokens[opening:opening + 1] == ["("]:
+            end = opening + len(_js_group(tokens, opening)) + 2
+            # Typed methods put a return annotation between ')' and '{'.
+            # Require a declaration prefix so ternaries/case labels containing
+            # actual calls (e.g. condition ? query(...) : other) still count.
+            typed_method = (tokens[end:end + 1] == [":"] and exported is not None
+                            and i > 0 and tokens[i - 1] in {
+                                "{", "}", ";", ",", "*", "async", "static",
+                                "public", "private", "protected", "override", "abstract",
+                            })
+            if tokens[end:end + 1] == ["{"] or typed_method:
+                continue  # method/function declaration, not a call
+            calls[opening] = (i, label)
+    return calls
+
+
 def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs_by_fw,
                             filename="", javascript_sources=None):
     if agent_creation_category is None:
@@ -1791,10 +2017,25 @@ def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs
     has_graph_context = bool(_JS_GRAPH_COMPILE_CONTEXT_RE.search(code))
     call_tokens = {m.start(): i for i, m in enumerate(matches) if m.group() == "("}
     hits, seen = [], set()
+    for opening, (start, label) in _js_sdk_agent_calls(tokens).items():
+        if label not in agent_creation_category.frameworks:
+            continue
+        args = _js_group(tokens, opening)
+        options = _js_group(args, 0) if args[:1] == ["{"] else []
+        hits.append({
+            "name": None, "framework": label,
+            "line": source.count("\n", 0, matches[start].start()) + 1,
+            "matched_call": source[matches[start].start():matches[opening].end()],
+            "tools_bound": _js_tools(_js_property(options, "tools"), tokens,
+                                     filename, javascript_sources),
+        })
+        seen.add(matches[opening].start())
     for pattern_str, label, regex, _is_generic in agent_creation_category._ranked:
         allowed_langs = allowed_langs_by_fw.get(label)
         # new McpServer(/new Server( creates a tool-exposing server, not an LLM agent -- excluded from n_agents
         if label == "MCP SDK" or (allowed_langs is not None and "javascript" not in allowed_langs):
+            continue
+        if label in _JS_PACKAGE_REQUIRED:
             continue
         if "(" not in pattern_str:
             continue
@@ -1950,6 +2191,23 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
 
     source_lines = source.splitlines()
     import_aliases = _build_import_aliases(tree)
+    # The newly supported query() name is especially common. Apply the same
+    # conservative file-wide shadow/reassignment policy as the JS SDK pass.
+    sdk_aliases = {name for name, canonical in import_aliases.items()
+                   if canonical.split(".")[0] in {"claude_agent_sdk", "claude_code_sdk"}}
+    for node in ast.walk(tree):
+        shadow = None
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadow = node.name
+        elif isinstance(node, ast.arg):
+            shadow = node.arg
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            shadow = node.id
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if isinstance(node.value, ast.Name):
+                shadow = node.value.id
+        if shadow in sdk_aliases:
+            import_aliases.pop(shadow, None)
     extra_agent_classes, extra_store_classes = _build_subclass_extensions(
         tree, agent_creation_category, rag_creation_category, import_aliases
     )

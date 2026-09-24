@@ -1,6 +1,7 @@
 # Agent Creation Patterns
 
-Scope: Table II frameworks plus CAMEL. Counts include bundled-library creation sites.
+Scope: Table II frameworks plus CAMEL and Claude Agent SDK. Counts include
+bundled-library creation sites.
 
 ## Detection Methods
 
@@ -20,6 +21,7 @@ Scope: Table II frameworks plus CAMEL. Counts include bundled-library creation s
 | **Agno** | `from agno.agent import Agent`<br>`agno\.Agent`<br>`Agent(`<br>`Team(`<br>`Workflow(`<br>`@agent`<br>`@crew`<br>`@tool`<br>`.run(`<br>`.arun(` |
 | **Browser-use** | `Agent(` *(confirmed via `from browser_use import Agent`, same import-confirmation mechanism as every other bare "Agent(" row)* |
 | **CAMEL** | `ChatAgent(` *(import-confirmed)* |
+| **Claude Agent SDK** | `query(`<br>`ClaudeSDKClient(` *(import-confirmed via `from claude_agent_sdk import query, ClaudeSDKClient` or the legacy claude_code_sdk package; bare `query(` is far too common to count unconfirmed)* |
 | **LangChain** | `create_agent(`<br>`create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`create_pandas_dataframe_agent(`<br>`create_sql_agent(`<br>`initialize_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
 | **LangGraph** | `StateGraph(`<br>`MessageGraph(`<br>`.add_node(`<br>`.compile(`<br>`create_react_agent(` |
 | **CrewAI** | `Agent(`<br>`@agent`<br>`@crew`<br>`Process.sequential`<br>`Process.hierarchical` |
@@ -47,6 +49,7 @@ Scope: Table II frameworks plus CAMEL. Counts include bundled-library creation s
 | **Deep Agents JS** | `createDeepAgent(`<br>`from "deepagents"`<br>`from 'deepagents'`<br>`\bDeepAgent\b`<br>`\bCreateDeepAgentParams\b` |
 | **Bee Agent Framework** | `new ReActAgent(`<br>`new RequirementAgent(`<br>`@i-am-bee/beeai-framework`<br>`from 'beeai-framework'` |
 | **CopilotKit** | `useCopilotAction(`<br>`<CopilotKit`<br>`@copilotkit/react-core` |
+| **Claude Agent SDK** | `query(` *(calls must resolve to a named or namespace binding from `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code`; aliases and direct require/dynamic import bindings are supported)* |
 | **MCP SDK** | `new McpServer(`<br>`new Server(`<br>`@modelcontextprotocol/sdk` *(bare Server( is excluded — it's a substring of any unrelated createServer(/fooServer( call, confirmed a real false-positive source by testing; a bare "MCP" substring is excluded for the same reason — see Protocols note below)* |
 
 ---
@@ -118,6 +121,9 @@ from deepagents import create_deep_agent
 
 # Google ADK
 from google.adk.agents import Agent, LlmAgent
+
+# Claude Agent SDK
+from claude_agent_sdk import query, ClaudeSDKClient
 ```
 
 ### Notes on scope
@@ -138,6 +144,17 @@ from google.adk.agents import Agent, LlmAgent
   agent constructors call it internally, hidden inside the library, so seeing it in
   app code means that constructor was skipped. Counted as custom-agent evidence
   (`n_custom_agents`) in pattern_detector.py, not via this table.
+
+Claude Agent SDK counts represent confirmed call sites, not distinct agents or
+runtime invocations. Python
+confirms the `query` and `ClaudeSDKClient` exports from the current or legacy
+Claude SDK; calls on an existing client do not add creation sites.
+
+JS/TS confirmation follows named/namespace imports and direct `require()` or
+awaited `import()` bindings. Re-exports and indirect loaders are not resolved.
+Reassigned or shadowed SDK bindings are conservatively excluded throughout the
+file. JavaScript uses a lightweight token scan, not a full parser; template
+interpolations and more complex binding/control-flow forms can be missed.
 
 ## Verification
 

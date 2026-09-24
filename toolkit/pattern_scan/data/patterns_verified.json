@@ -38,6 +38,13 @@
         "CAMEL": [
           "ChatAgent("
         ],
+        "Claude Agent SDK": [
+          "@anthropic-ai/claude-agent-sdk",
+          "@anthropic-ai/claude-code",
+          "ClaudeSDKClient(",
+          "from claude_agent_sdk import query, ClaudeSDKClient",
+          "query("
+        ],
         "CopilotKit": [
           "<CopilotKit",
           "@copilotkit/react-core",
@@ -168,6 +175,10 @@
           "python"
         ],
         "CAMEL": [
+          "python"
+        ],
+        "Claude Agent SDK": [
+          "javascript",
           "python"
         ],
         "CopilotKit": [
