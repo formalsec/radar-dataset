@@ -1,6 +1,6 @@
 # Agent Creation Patterns
 
-Scope: Table II frameworks plus CAMEL and Claude Agent SDK. Counts include
+Scope: Table II frameworks plus CAMEL, Claude Agent SDK and Pi. Counts include
 bundled-library creation sites.
 
 ## Detection Methods
@@ -50,6 +50,7 @@ bundled-library creation sites.
 | **Bee Agent Framework** | `new ReActAgent(`<br>`new RequirementAgent(`<br>`@i-am-bee/beeai-framework`<br>`from 'beeai-framework'` |
 | **CopilotKit** | `useCopilotAction(`<br>`<CopilotKit`<br>`@copilotkit/react-core` |
 | **Claude Agent SDK** | `query(` *(calls must resolve to a named or namespace binding from `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code`; aliases and direct require/dynamic import bindings are supported)* |
+| **Pi** | `createAgentSession(`<br>`createAgentSessionFromServices(`<br>`createAgentSessionRuntime(`<br>`agentLoop(`<br>`agentLoopContinue(`<br>`runAgentLoop(`<br>`runAgentLoopContinue(` *(calls must resolve to a named or namespace binding from `@earendil-works/pi-coding-agent`, `@mariozechner/pi-coding-agent`, `@earendil-works/pi-agent-core` or `@mariozechner/pi-agent-core`; aliases and direct require/dynamic import bindings are supported)* |
 | **MCP SDK** | `new McpServer(`<br>`new Server(`<br>`@modelcontextprotocol/sdk` *(bare Server( is excluded — it's a substring of any unrelated createServer(/fooServer( call, confirmed a real false-positive source by testing; a bare "MCP" substring is excluded for the same reason — see Protocols note below)* |
 
 ---
@@ -145,8 +146,8 @@ from claude_agent_sdk import query, ClaudeSDKClient
   app code means that constructor was skipped. Counted as custom-agent evidence
   (`n_custom_agents`) in pattern_detector.py, not via this table.
 
-Claude Agent SDK counts represent confirmed call sites, not distinct agents or
-runtime invocations. Python
+Claude Agent SDK and Pi counts represent confirmed call sites, including Pi
+continuation-loop calls, not distinct agents or runtime invocations. Python
 confirms the `query` and `ClaudeSDKClient` exports from the current or legacy
 Claude SDK; calls on an existing client do not add creation sites.
 

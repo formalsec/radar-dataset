@@ -137,6 +137,19 @@
           "from openai import Agent",
           "openai.agents"
         ],
+        "Pi": [
+          "@earendil-works/pi-agent-core",
+          "@earendil-works/pi-coding-agent",
+          "@mariozechner/pi-agent-core",
+          "@mariozechner/pi-coding-agent",
+          "agentLoop(",
+          "agentLoopContinue(",
+          "createAgentSession(",
+          "createAgentSessionFromServices(",
+          "createAgentSessionRuntime(",
+          "runAgentLoop(",
+          "runAgentLoopContinue("
+        ],
         "Pydantic AI": [
           "@agent.tool",
           "@agent.tool_plain",
@@ -219,6 +232,9 @@
         ],
         "OpenAI Agents SDK": [
           "python"
+        ],
+        "Pi": [
+          "javascript"
         ],
         "Pydantic AI": [
           "python"

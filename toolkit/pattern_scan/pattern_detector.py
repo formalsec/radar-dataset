@@ -1771,9 +1771,13 @@ _UNDICI_AGENT_OPTION_KEYS = {
 # These ordinary function names need callee-level import confirmation.
 _JS_PACKAGE_REQUIRED = {
     "Claude Agent SDK": ("@anthropic-ai/claude-agent-sdk", "@anthropic-ai/claude-code"),
+    "Pi": ("@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent",
+           "@earendil-works/pi-agent-core", "@mariozechner/pi-agent-core"),
 }
 _JS_AGENT_EXPORTS = {
     "Claude Agent SDK": {"query"},
+    "Pi": {"createAgentSession", "createAgentSessionFromServices", "createAgentSessionRuntime",
+           "agentLoop", "agentLoopContinue", "runAgentLoop", "runAgentLoopContinue"},
 }
 
 # A parenthesized head belonging to one of these is control flow, not a
