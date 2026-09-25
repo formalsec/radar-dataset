@@ -22,13 +22,14 @@ ENV/
 
 # Generated crawler outputs
 #crawler/output/
-#crawler/seen_repos.json
-#crawler/classifications_*.json
-#crawler/classifications_*.json.backup*
-#crawler/*_backup.json
+crawler/seen_repos.json
+crawler/classifications_*.json
+crawler/classifications_*.json.backup*
+crawler/*_backup.json
 
 # Generated scanner outputs and downloaded repositories
-toolkit/output/
+#toolkit/output/
+toolkit/output/scan_results/*
 
 # Generated manifests and temporary data
 *.meta.json
