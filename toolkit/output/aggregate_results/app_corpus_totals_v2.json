@@ -1,0 +1,11 @@
+{
+  "repos_in_file": 516,
+  "repos_scanned": 514,
+  "repos_failed": 2,
+  "total_n_agents": 2203,
+  "total_n_custom_agents": 112,
+  "total_n_tools": 340,
+  "repos_with_at_least_1_agent": 218,
+  "repos_with_at_least_1_tool": 33,
+  "repos_with_rag": 143
+}

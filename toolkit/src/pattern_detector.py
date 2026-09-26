@@ -54,6 +54,8 @@ MODULE_TO_FRAMEWORK = {
     "smolagents": "Smolagents",
     "agents": "OpenAI Agents SDK",
     "beeai_framework": "Bee Agent Framework", "bee_agent_framework": "Bee Agent Framework",
+    "deepagents": "Deep Agents",
+    "camel": "CAMEL",
     "chromadb": "Chroma",
     "qdrant_client": "Qdrant",
     "pinecone": "Pinecone",
@@ -64,8 +66,12 @@ MODULE_TO_FRAMEWORK = {
     "zep_python": "Zep", "zep_cloud": "Zep",
     "openai": "OpenAI SDK",
     "anthropic": "Anthropic SDK",
-    "google": "Google GenAI",  # covers google.genai / google.generativeai
+    "claude_agent_sdk": "Claude Agent SDK",
+    "claude_code_sdk": "Claude Agent SDK",
+    "google": "Google GenAI",  # covers google.genai / google.generativeai -- see MODULE_SUBPATH_TO_FRAMEWORK for google.adk
     "together": "Together SDK",
+    "groq": "Groq SDK",
+    "mistralai": "Mistral SDK",
     "instructor": "Instructor",
     "playwright": "Playwright",
     "browser_use": "Browser-use",
@@ -76,6 +82,46 @@ MODULE_TO_FRAMEWORK = {
     "a2a": "A2A SDK", "a2a_sdk": "A2A SDK",
     # TODO: extend as real repos surface more import styles not covered here.
 }
+
+# Submodule-level overrides, checked BEFORE MODULE_TO_FRAMEWORK's single
+# top-level-segment lookup -- needed when a specific submodule belongs to a
+# DIFFERENT framework than its top-level package's default mapping (e.g.
+# `google.adk` is Google's Agent Development Kit, not Google GenAI, even
+# though both import under plain `google`).
+MODULE_SUBPATH_TO_FRAMEWORK = {
+    "google.adk": "Google ADK",
+}
+
+
+def _resolve_module_framework(canonical):
+    """
+    `canonical` is the FULL dotted import path (e.g.
+    "google.adk.agents.Agent", "browser_use", "langchain_classic.agents"),
+    not just its first segment -- needed so a submodule can be resolved
+    differently from its top-level package (see MODULE_SUBPATH_TO_FRAMEWORK).
+
+    Falls back to MODULE_TO_FRAMEWORK.get(module_root), plus a prefix rule
+    for LangChain's own package split: separate PyPI/import roots per
+    integration (langchain_openai, langchain_anthropic, langchain_mistralai,
+    langchain_classic, langchain_community, ...) that all still ship as
+    part of the LangChain framework. Confirmed a real gap by testing: `from
+    langchain_classic.agents import AgentExecutor, create_tool_calling_agent`
+    left both calls completely unconfirmed, because only bare "langchain"
+    was ever mapped. A prefix rule (vs. hardcoding each package name) covers
+    future langchain_* splits the same way.
+    """
+    parts = canonical.split(".")
+    if len(parts) > 1:
+        subpath_fw = MODULE_SUBPATH_TO_FRAMEWORK.get(f"{parts[0]}.{parts[1]}")
+        if subpath_fw is not None:
+            return subpath_fw
+    module_root = parts[0]
+    fw = MODULE_TO_FRAMEWORK.get(module_root)
+    if fw is not None:
+        return fw
+    if module_root.startswith("langchain_"):
+        return "LangChain"
+    return None
 
 
 def _build_import_aliases(tree):
@@ -100,6 +146,7 @@ def _build_import_aliases(tree):
     return aliases
 
 import json
+import posixpath
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,6 +175,12 @@ _JS_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 # -- covers the conventions actually seen across LangChain/CrewAI/AutoGen/
 # LlamaIndex-style constructors. TODO: extend from real examples.
 _STORE_LINK_KWARGS = ("memory", "vector_store", "vectorstore", "retriever", "knowledge", "store")
+
+# Modules whose own `.compile(` method has nothing to do with an agent
+# graph (re.compile, py_compile.compile, ...) but share the generic
+# "Graph Compile" pattern's bare `.compile(` text. TODO: extend as real
+# repos surface more such collisions.
+_NON_AGENT_COMPILE_MODULES = {"re", "regex", "py_compile", "_re"}
 
 # One-hop taint markers -- keyword-based, NOT real taint tracking. See
 # module docstring, point 4.
@@ -158,6 +211,9 @@ class FileResult:
     llm_tool_calls: list = field(default_factory=list)  # Option A: confirmed OpenAI/Anthropic tools= calls
     tool_use_markers: list = field(default_factory=list)  # custom tool-registration markers (line-located)
     agent_markers: list = field(default_factory=list)  # custom agent-abstraction markers (line-located)
+    tool_definition_markers: list = field(default_factory=list)  # Unconfirmed definition markers
+    custom_agents: list = field(default_factory=list)  # confirmed hand-rolled agents, see _group_custom_agents
+    confirmed_tool_definitions: list = field(default_factory=list)  # Confirmed Python tool definitions
 
 
 class CompiledCategory:
@@ -236,12 +292,18 @@ class PatternDetector:
             cat: CompiledCategory(data["frameworks"], data["generic"])
             for cat, data in raw["categories"].items()
         }
+        # language(s) each framework's patterns were written for; absent = unrestricted
+        self._framework_languages = {
+            cat: data.get("framework_languages", {})
+            for cat, data in raw["categories"].items()
+        }
         self.max_file_size_bytes = max_file_size_bytes
         self._agent_creation_category = self.categories.get("agent_creation")
         self._rag_creation_category = self.categories.get("rag_creation")
         self._rag_writes_category = self.categories.get("rag_writes")
         self._rag_reads_category = self.categories.get("rag_reads")
         self._agent_calls_category = self.categories.get("agent_calls")
+        self._tool_definition_category = self.categories.get("tool_definition")
 
     def analyze(self, filepath):
         filepath = Path(filepath)
@@ -260,7 +322,8 @@ class PatternDetector:
             return FileResult(language=language, skipped_reason=f"read failed: {e}")
         return self.analyze_source(source, filepath.name)
 
-    def analyze_source(self, source, filename, size_bytes=None, external_exports=None):
+    def analyze_source(self, source, filename, size_bytes=None, external_exports=None,
+                       javascript_sources=None):
         """
         external_exports: optional {"stores": {module: {var: framework}},
         "agents": {module: {var: framework}}} collected from a FIRST pass
@@ -278,20 +341,37 @@ class PatternDetector:
         if size_bytes is not None and size_bytes > self.max_file_size_bytes:
             return FileResult(language=language, skipped_reason=f"file too large ({size_bytes} bytes)")
 
+        source_lines = source.splitlines()
+        tool_definition_markers = _detect_tool_definition_markers(source_lines)
         if language == "python":
             reduced = _reduce_python(
                 source, self._agent_creation_category,
                 self._rag_creation_category, self._rag_writes_category,
                 self._rag_reads_category, self._agent_calls_category,
+                self._tool_definition_category,
                 external_exports=external_exports,
             )
             (reduced_text, parse_error, named_agents, named_stores,
              store_links, tainted_writes, write_sites, read_sites, call_sites, imports,
-             llm_tool_calls, tool_use_markers, agent_markers) = reduced
+             llm_tool_calls, tool_use_markers, agent_markers,
+             confirmed_tool_definitions) = reduced
         else:
             reduced_text, parse_error = _reduce_javascript(source), None
-            named_agents, named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], [], []
-            llm_tool_calls, tool_use_markers, agent_markers = [], [], []
+            named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], []
+            # No AST reduction for JS/TS -- plain-text detectors only.
+            named_agents = _detect_js_named_agents(
+                source_lines, self._agent_creation_category,
+                self._framework_languages.get("agent_creation", {}),
+                filename, javascript_sources,
+            )
+            llm_tool_calls = _detect_bind_tools_calls(source_lines)
+            tool_use_markers = _detect_tool_use_markers(source_lines)
+            agent_markers = _detect_agent_markers(source_lines)
+            confirmed_tool_definitions = (
+                _detect_webmcp_tool_definitions(source_lines, filename, javascript_sources)
+                + _detect_js_registry_tool_definitions(source_lines, filename, javascript_sources)
+                + _detect_js_mcp_server_tool_definitions(source_lines)
+            )
 
         result = FileResult(
             language=language, parse_error=parse_error,
@@ -300,6 +380,9 @@ class PatternDetector:
             write_sites=write_sites, read_sites=read_sites, call_sites=call_sites,
             imports=imports, llm_tool_calls=llm_tool_calls,
             tool_use_markers=tool_use_markers, agent_markers=agent_markers,
+            tool_definition_markers=tool_definition_markers,
+            custom_agents=_group_custom_agents(llm_tool_calls),
+            confirmed_tool_definitions=confirmed_tool_definitions,
         )
 
         # ONE flat list, same shape for everything: what was found, what
@@ -307,11 +390,15 @@ class PatternDetector:
         # meant for scanning by eye / spot-checking against the source,
         # not for programmatic aggregation (radar_summary is still
         # computed from the structured lists above, not from this).
+        def _line_content(lineno):
+            return source_lines[lineno - 1].strip() if 0 < lineno <= len(source_lines) else None
+
         findings = []
         for a in named_agents:
             findings.append({
                 "type": "agent", "name": a["name"], "framework": a["framework"],
                 "matched": a.get("matched_call"), "line": a["line"],
+                "line_content": _line_content(a["line"]), "tools_bound": a.get("tools_bound"),
             })
         for s in named_stores:
             findings.append({
@@ -343,12 +430,13 @@ class PatternDetector:
             findings.append({
                 "type": "tool_use", "name": t["variable"], "framework": t["framework"],
                 "matched": "tools=", "line": t["line"],
-                "tool_names": t.get("tool_names"),
+                "line_content": _line_content(t["line"]), "tool_names": t.get("tool_names"),
             })
         for m in tool_use_markers:
             findings.append({
                 "type": "tool_use", "name": None, "framework": None,
                 "matched": m["matched"], "line": m["line"],
+                "line_content": _line_content(m["line"]),
             })
         # agent_marker: same idea as the tool_use markers above, for repos
         # whose agent abstraction is hand-rolled (no tracked framework
@@ -359,6 +447,29 @@ class PatternDetector:
             findings.append({
                 "type": "agent_marker", "name": None, "framework": None,
                 "matched": m["matched"], "line": m["line"],
+                "line_content": _line_content(m["line"]),
+            })
+        for m in tool_definition_markers:
+            findings.append({
+                "type": "tool_definition", "name": None, "framework": None,
+                "matched": m["matched"], "line": m["line"],
+                "line_content": _line_content(m["line"]),
+            })
+        for t in confirmed_tool_definitions:
+            findings.append({
+                "type": "confirmed_tool_definition", "name": t["name"], "framework": t["framework"],
+                "matched": t.get("matched_call"), "line": t["line"],
+                "line_content": _line_content(t["line"]),
+            })
+        # custom_agent: a hand-rolled agent counted separately from
+        # framework-confirmed ones (n_custom_agents in scan_api.py, not
+        # n_agents) -- confirmed only via real tool-calling evidence
+        # (result.llm_tool_calls), never a guess.
+        for c in result.custom_agents:
+            findings.append({
+                "type": "custom_agent", "name": c["variable"], "framework": c["framework"],
+                "matched": c.get("matched_call"), "line": c["line"],
+                "line_content": _line_content(c["line"]), "tool_names": c.get("tool_names"),
             })
         findings.sort(key=lambda f: f["line"])
         result.findings = findings
@@ -405,8 +516,12 @@ class PatternDetector:
         for cat_name, compiled_cat in self.categories.items():
             if cat_name in dedup_done:
                 continue
+            allowed_langs_by_fw = self._framework_languages.get(cat_name, {})
             cat_out = {}
             for fw_name, patterns in compiled_cat.frameworks.items():
+                allowed_langs = allowed_langs_by_fw.get(fw_name)
+                if allowed_langs is not None and language not in allowed_langs:
+                    continue
                 count, matched = _match_patterns(patterns, reduced_text)
                 if count:
                     cat_out[fw_name] = {"count": count, "patterns_matched": matched}
@@ -448,6 +563,21 @@ def _resolve_expr_text(node):
         return ast.unparse(node)
     except Exception:
         return ""
+
+
+def _unwrap_subscript_callee(func_node):
+    """Return the constructor behind a parameterized generic."""
+    if isinstance(func_node, ast.Subscript):
+        return func_node.value
+    return func_node
+
+
+def _callee_simple_name(func_node):
+    if isinstance(func_node, ast.Name):
+        return func_node.id
+    if isinstance(func_node, ast.Attribute):
+        return func_node.attr
+    return None
 
 
 def _match_constructor_text(call_or_base_text, category, imported_frameworks=None, require_confirmation=True):
@@ -600,14 +730,105 @@ def _extract_simple_target_name(targets):
     return _resolve_identity(targets[0])
 
 
-def _extract_tools_bound(call_node):
-    """`Agent(tools=[search_tool, calc_tool])` -> ["search_tool", "calc_tool"].
-    Attribution-gated tool counting: a tool only counts if it actually shows
-    up here, not just anywhere in the repo."""
+def _wrapping_call_framework(call_node, var_name, prelim_framework_by_var):
+    """True when `call_node` is a method call (`X.method(...)`) on a
+    receiver that's ALREADY a known creation of the SAME kind in this file
+    -- e.g. `app = workflow.compile()` after `workflow = StateGraph(...)`
+    is the same agent finalized, not a second one. Returns the receiver's
+    framework, or None. A bare-name creation call is never an Attribute
+    call and is untouched by this check."""
+    func = call_node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    receiver = _resolve_identity(func)
+    if receiver is None or receiver == var_name:
+        return None
+    return prelim_framework_by_var.get(receiver)
+
+
+def _tool_element_identifier(elt, import_aliases=None):
+    """Best-effort identifier for one element of a `tools=[...]` list: a bare
+    name (`search_tool`) or a tool-factory call (`get_search_ddg_tool()`) --
+    the latter is the dominant real shape for repos that build each Tool via
+    a small wrapper function, confirmed in naotaka1128/web_bowsing_agent's
+    `tools = [get_search_ddg_tool(), get_fetch_page_tool()]`."""
+    if isinstance(elt, ast.Name):
+        return elt.id
+    if isinstance(elt, ast.Attribute):
+        return elt.attr
+    if isinstance(elt, ast.Call):
+        canonical = _canonical_call_text(elt.func, import_aliases or {}) or ""
+        if canonical.startswith("camel.toolkits.") and canonical.endswith(".FunctionTool("):
+            wrapped = elt.args[0] if elt.args else next(
+                (kw.value for kw in elt.keywords if kw.arg == "func"), None)
+            return _tool_element_identifier(wrapped, import_aliases)
+        func = elt.func
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+    return None
+
+
+def _dict_value_for_key(dict_node, key):
+    """Look up a string key in a literal dictionary."""
+    if not isinstance(dict_node, ast.Dict):
+        return None
+    for k, v in zip(dict_node.keys, dict_node.values):
+        if isinstance(k, ast.Constant) and k.value == key:
+            return v
+    return None
+
+
+_POSITIONAL_TOOLS_ARG_INDEX = {
+    "create_react_agent": 1, "create_openai_tools_agent": 1,
+    "create_tool_calling_agent": 1, "create_structured_chat_agent": 1,
+    "initialize_agent": 0,
+}
+
+
+def _resolve_tools_value(value, assigns_by_func_and_name, func_ctx, import_aliases=None):
+    """Resolve a local tool list or tuple through one assignment."""
+    if isinstance(value, ast.Name) and assigns_by_func_and_name is not None:
+        value = assigns_by_func_and_name.get((func_ctx, value.id), value)
+    if isinstance(value, (ast.List, ast.Tuple)):
+        return [name for name in (_tool_element_identifier(e, import_aliases) for e in value.elts) if name]
+    return None
+
+
+def _extract_tools_bound(call_node, assigns_by_func_and_name=None, func_ctx=None, callee_name=None,
+                         import_aliases=None):
+    """Extract tools from keywords, literal kwargs, or known positional arguments."""
     for kw in call_node.keywords:
-        if kw.arg == "tools" and isinstance(kw.value, (ast.List, ast.Tuple)):
-            return [elt.id for elt in kw.value.elts if isinstance(elt, ast.Name)]
+        if kw.arg == "tools":
+            names = _resolve_tools_value(kw.value, assigns_by_func_and_name, func_ctx, import_aliases)
+            if names is not None:
+                return names
+        elif kw.arg is None:
+            source = kw.value
+            if isinstance(source, ast.Name) and assigns_by_func_and_name is not None:
+                source = assigns_by_func_and_name.get((func_ctx, source.id))
+            names = _resolve_tools_value(_dict_value_for_key(source, "tools"),
+                                          assigns_by_func_and_name, func_ctx, import_aliases)
+            if names is not None:
+                return names
+
+    idx = _POSITIONAL_TOOLS_ARG_INDEX.get(callee_name)
+    if idx is not None and len(call_node.args) > idx:
+        names = _resolve_tools_value(call_node.args[idx], assigns_by_func_and_name, func_ctx, import_aliases)
+        if names is not None:
+            return names
     return []
+
+
+def _extract_bind_tools_names(call_node):
+    """`model.bind_tools([search_tool, calc_tool])` -> ["search_tool", "calc_tool"].
+    Same shape as _extract_tools_bound, but bind_tools takes tools as the
+    first positional argument, not a tools= keyword."""
+    if not call_node.args or not isinstance(call_node.args[0], (ast.List, ast.Tuple)):
+        return None
+    names = [elt.id for elt in call_node.args[0].elts if isinstance(elt, ast.Name)]
+    return names or None
 
 
 def _extract_store_link(call_node, known_store_vars):
@@ -650,6 +871,24 @@ def _is_write_argument_tainted(call_node, assigns_by_func_and_name, func_ctx):
     return False, None
 
 
+def _find_starred_tools_value(call_node, assigns_by_func_and_name, func_ctx):
+    """`.create(**api_kwargs)` where `api_kwargs` was built (in this same
+    function) as a Dict literal containing a "tools" key -- the dominant
+    real shape SDK-wrapper code uses instead of a literal `tools=` keyword
+    at the call site itself (confirmed real via NousResearch/hermes-agent's
+    `api_kwargs = {..., "tools": self.tools}; client.create(**api_kwargs)`).
+    One-hop, same-function lookback -- same idea and same limits as the
+    taint-source lookback above, not real dataflow propagation."""
+    for kw in call_node.keywords:
+        if kw.arg is not None or not isinstance(kw.value, ast.Name):
+            continue
+        source = assigns_by_func_and_name.get((func_ctx, kw.value.id))
+        value = _dict_value_for_key(source, "tools")
+        if value is not None:
+            return value
+    return None
+
+
 def _has_sanitizer_nearby(source_lines, line_no, window=5):
     start = max(0, line_no - window)
     context = " ".join(source_lines[start:line_no]).lower()
@@ -688,14 +927,20 @@ def _resolve_variable_aliases(tree, *framework_dicts):
     while changed:
         changed = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign):
+            # Same shape for `x = y` and an annotated `x: T = y`; only the
+            # target/value accessors differ.
+            if isinstance(node, ast.Assign):
+                if len(node.targets) != 1:
+                    continue
+                target_node, value_node = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign):
+                target_node, value_node = node.target, node.value
+            else:
                 continue
-            if not isinstance(node.value, ast.Name):
+            if not isinstance(value_node, ast.Name) or not isinstance(target_node, ast.Name):
                 continue
-            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
-                continue
-            target = node.targets[0].id
-            source_var = node.value.id
+            target = target_node.id
+            source_var = value_node.id
             for d in framework_dicts:
                 if source_var in d and target not in d:
                     d[target] = d[source_var]
@@ -728,22 +973,70 @@ def _frameworks_for_call_identifier(func_node, import_aliases):
         canonical = import_aliases.get(func_node.id)
         if canonical is None:
             return set()
-        module_root = canonical.split(".")[0]
     elif isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Name):
         base = func_node.value.id
-        canonical = import_aliases.get(base)
-        module_root = canonical.split(".")[0] if canonical else base
+        canonical = import_aliases.get(base) or base
     else:
         return set()
-    fw = MODULE_TO_FRAMEWORK.get(module_root)
+    fw = _resolve_module_framework(canonical)
+    if fw == "Claude Agent SDK" and _canonical_call_text(func_node, import_aliases) not in {
+        f"{package}.{entry}("
+        for package in ("claude_agent_sdk", "claude_code_sdk")
+        for entry in ("query", "ClaudeSDKClient")
+    }:
+        return set()  # Require the actual export and a surviving import binding.
     return {fw} if fw else set()
+
+
+def _is_non_agent_compile_call(func_node, import_aliases):
+    """True when `func_node` -- the callee expression of an agent_creation
+    candidate call -- contains a `<module>.compile(` on a module in
+    _NON_AGENT_COMPILE_MODULES anywhere in it, e.g. `re.compile(...)`.
+
+    Needed because the generic "Graph Compile" agent_creation pattern is a
+    bare `\\.compile\\s*\\(` matched against the callee's full unparsed
+    text (call_text), meant for LangGraph's `workflow.compile()` but
+    textually indistinguishable from any other object's `.compile(`
+    method -- including one nested inside a larger expression, e.g.
+    `re.compile(...).match(` or `self._app.action(re.compile(...))(`,
+    where the OUTER call is `.match(`/`self._app.action(...)(` but the
+    substring match still fires because `_match_constructor_text` searches
+    the whole call_text, not just the outermost identifier. Walking the
+    same func_node subtree here (instead of only its outermost attribute)
+    mirrors that substring behavior so the exclusion actually cancels it.
+
+    Confirmed as a real, severe false-positive source by testing against
+    NousResearch/hermes-agent: 903 of 909 "agents" detected there were
+    plain `re.compile(...)` calls, plus 2 more from the nested shapes
+    above. Not specific to that repo -- any Python file that imports `re`
+    and calls `re.compile()` (nearly all of them) hits this.
+    """
+    for node in ast.walk(func_node):
+        if not (isinstance(node, ast.Attribute) and node.attr == "compile"):
+            continue
+        base = node.value
+        if not isinstance(base, ast.Name):
+            continue
+        canonical = import_aliases.get(base.id, base.id)
+        if canonical.split(".")[0] in _NON_AGENT_COMPILE_MODULES:
+            return True
+    return False
 
 
 LLM_CLIENT_CONSTRUCTORS = {
     "OpenAI": "OpenAI SDK",
     "AsyncOpenAI": "OpenAI SDK",
+    "AzureOpenAI": "OpenAI SDK",
+    "AsyncAzureOpenAI": "OpenAI SDK",
     "Anthropic": "Anthropic SDK",
     "AsyncAnthropic": "Anthropic SDK",
+    # Provider SDKs; Mistral request paths are handled separately below.
+    "Groq": "Groq SDK",
+    "AsyncGroq": "Groq SDK",
+    "Mistral": "Mistral SDK",  # mistralai v1+ client class (was MistralClient pre-1.0)
+    "MistralClient": "Mistral SDK",
+    "Together": "Together SDK",
+    "AsyncTogether": "Together SDK",
 }
 
 # Option A: tools are only reliably detectable for a CUSTOM (non-tracked-
@@ -753,6 +1046,135 @@ LLM_CLIENT_CONSTRUCTORS = {
 # all. This is confirmed the same way as everything else: the receiving
 # client must trace back to a real OpenAI/Anthropic SDK import.
 LLM_TOOL_CALL_METHODS = {"create", "stream"}  # .chat.completions.create(, .messages.create(, .messages.stream(
+
+# Provider-key evidence for otherwise unrecognized clients.
+LLM_ENV_VAR_PROVIDERS = {
+    "GROQ_API_KEY": "Groq SDK",
+    "TOGETHER_API_KEY": "Together SDK",
+    "MISTRAL_API_KEY": "Mistral SDK",
+    "COHERE_API_KEY": "Cohere SDK",
+    "DEEPSEEK_API_KEY": "DeepSeek SDK",
+    "XAI_API_KEY": "xAI SDK",
+    "GROK_API_KEY": "xAI SDK",
+    "OPENROUTER_API_KEY": "OpenRouter",
+    "FIREWORKS_API_KEY": "Fireworks SDK",
+    "PERPLEXITY_API_KEY": "Perplexity SDK",
+    "REPLICATE_API_TOKEN": "Replicate",
+    "HUGGINGFACE_API_KEY": "HuggingFace",
+    "HUGGINGFACEHUB_API_TOKEN": "HuggingFace",
+    "HF_TOKEN": "HuggingFace",
+    "GOOGLE_API_KEY": "Google GenAI",
+    "GEMINI_API_KEY": "Google GenAI",
+    "CEREBRAS_API_KEY": "Cerebras SDK",
+    "NVIDIA_API_KEY": "NVIDIA NIM",
+}
+
+
+def _env_var_provider(node):
+    """Recognize the key of an actual environment lookup, not nearby strings."""
+    key = None
+    if isinstance(node, ast.Call):
+        path = _resolve_expr_text(node.func)
+        if path in {"os.getenv", "os.environ.get", "environ.get"} and node.args:
+            key = node.args[0]
+    elif isinstance(node, ast.Subscript):
+        if _resolve_expr_text(node.value) in {"os.environ", "environ"}:
+            key = node.slice
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return LLM_ENV_VAR_PROVIDERS.get(key.value)
+    return None
+
+
+def _call_references_llm_env_var(call_node):
+    for arg in list(call_node.args) + [kw.value for kw in call_node.keywords]:
+        for node in ast.walk(arg):
+            provider = _env_var_provider(node)
+            if provider:
+                return provider
+    return None
+
+
+def _llm_constructor_name(func, import_aliases):
+    canonical = _canonical_call_text(func, import_aliases)
+    return canonical[:-1].rsplit(".", 1)[-1] if canonical else _callee_simple_name(func)
+
+
+def _build_llm_client_factory_functions(tree, import_aliases):
+    """
+    Detects `def f(...): ... return OpenAI(...)` (or AsyncOpenAI/Anthropic/
+    AsyncAnthropic) defined in THIS file -- single-hop, same idea as
+    _build_subclass_extensions -- so `self.client = self._init_client(...)`
+    still resolves to the real SDK framework even though the constructor
+    call itself lives in a different function's body than the assignment.
+    Confirmed necessary by testing against NousResearch/hermes-agent, whose
+    client is built through exactly this indirection; without it, the
+    client variable never registers, so a later confirmed `tools=` call on
+    it goes completely undetected.
+    """
+    factories = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for stmt in ast.walk(fn):
+            if not (isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Call)):
+                continue
+            call = stmt.value
+            name = _llm_constructor_name(call.func, import_aliases)
+            if name not in LLM_CLIENT_CONSTRUCTORS:
+                continue
+            call_frameworks = _frameworks_for_call_identifier(call.func, import_aliases)
+            if LLM_CLIENT_CONSTRUCTORS[name] in call_frameworks:
+                factories[fn.name] = LLM_CLIENT_CONSTRUCTORS[name]
+                break
+    return factories
+
+
+def _build_llm_client_wrapper_classes(tree, import_aliases):
+    """Map local wrapper classes whose ``__init__`` creates an SDK client.
+
+    This is deliberately limited to one hop and to the constructor body: a
+    local class is only treated as an LLM client when its own initialization
+    contains a confirmed SDK constructor.  That lets callers use a wrapper
+    object through an SDK-shaped interface without promoting arbitrary
+    ``*Client``/``*Agent`` classes to LLM clients.
+    """
+    wrappers = {}
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        init = next(
+            (node for node in cls.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node.name == "__init__"),
+            None,
+        )
+        if init is None:
+            continue
+        for node in ast.walk(init):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _llm_constructor_name(node.func, import_aliases)
+            framework = LLM_CLIENT_CONSTRUCTORS.get(name)
+            if framework is None:
+                continue
+            if framework in _frameworks_for_call_identifier(node.func, import_aliases):
+                wrappers[cls.name] = framework
+                break
+    return wrappers
+
+
+def _build_llm_env_var_classes(tree):
+    """Map local classes with provider-key lookups to candidate providers."""
+    providers = {}
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for node in ast.walk(cls):
+            provider = _env_var_provider(node)
+            if provider:
+                providers[cls.name] = provider
+                break
+    return providers
 
 
 def _extract_literal_tool_names(tools_node):
@@ -817,6 +1239,19 @@ _AGENT_MARKER_PATTERN = re.compile(
 # build agents), which is exactly why framework-based detection is the
 # primary signal and these markers are only a secondary, unconfirmed one.
 
+_TOOL_DEFINITION_MARKER_PATTERN = re.compile(
+    r"@tool\b|@function_tool\b|@agent\.tool\b|@agent\.tool_plain\b|"
+    r"@mcp\.tool\b|@server\.call_tool\b|@server\.list_tools\b|"
+    r"@controller\.action\b|"
+    r"\bBaseTool\b|\bFunctionTool\s*\(|\bQueryEngineTool\s*\(|"
+    r"\bStructuredTool\.from_function\s*\(|"
+    r"\bnew\s+DynamicStructuredTool\s*\(|\bnew\s+DynamicTool\s*\(|"
+    r"\bcreateTool\s*\(|\buseCopilotAction\s*\(|"
+    r"\bregisterTool\s*\(|\bserver\.tool\s*\(|"
+    r"\bserver\.setRequestHandler\s*\(\s*ListToolsRequestSchema|"
+    r"\bserver\.setRequestHandler\s*\(\s*CallToolRequestSchema"
+)
+
 
 
 def _scan_line_markers(source_lines, pattern):
@@ -830,6 +1265,875 @@ def _scan_line_markers(source_lines, pattern):
     return hits
 
 
+# A small lexical pass keeps comments/strings out of creation counts and lets
+# tool extraction balance nested object literals without a JS parser dependency.
+_JS_TOKEN_RE = re.compile(
+    r"//[^\n]*|/\*.*?\*/|'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|"
+    r"`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|\.\.\.|\+\+|--|[^\s]", re.DOTALL,
+)
+_JS_REGEX_RE = re.compile(r"/(?:\\[^\r\n]|\[(?:\\[^\r\n]|[^\]\\\r\n])*\]|[^/\\\[\r\n])+/[a-z]*")
+_JS_EXPRESSION_PREFIXES = {
+    "(", "[", "{", ",", ";", ":", "=", "!", "?", "&", "|", "+", "-", "*", "/", "%",
+    "~", "^", "<", ">", "return", "throw", "case", "yield", "await", "void", "typeof",
+    "delete", "in", "instanceof", "else", "do",
+}
+_JS_GRAPH_COMPILE_CONTEXT_RE = re.compile(r"StateGraph\s*\(|\.addNode\s*\(")
+
+
+def _js_tokens(source):
+    matches, parens, braces = [], [], []
+    position, regex_allowed = 0, True
+    while (match := _JS_TOKEN_RE.search(source, position)) is not None:
+        token = match.group()
+        position = match.end()
+        if token.startswith(("//", "/*")):
+            continue
+        # A slash after an operand is division; in an expression-start position
+        # a complete regex is one opaque token, including escapes/character classes.
+        if token == "/" and regex_allowed:
+            literal = _JS_REGEX_RE.match(source, match.start())
+            if literal:
+                match, token, position = literal, literal.group(), literal.end()
+        previous = matches[-1].group() if matches else ""
+        if token == "(":
+            parens.append(previous in {"if", "for", "while", "with", "switch", "catch"}
+                          or (previous == "await" and len(matches) > 1
+                              and matches[-2].group() == "for"))
+        if token == "{":
+            braces.append(previous in {"", ";", "{", "}", ")", "else", "do", "try", "finally"})
+        if token == ")":
+            regex_allowed = parens.pop() if parens else False
+        elif token == "}":
+            regex_allowed = braces.pop() if braces else False
+        else:
+            regex_allowed = token in _JS_EXPRESSION_PREFIXES and previous != "."
+        matches.append(match)
+    return matches
+
+
+def _js_parts(tokens):
+    """Split comma-separated expressions, keeping nested expressions intact."""
+    start, depth = 0, 0
+    for i, token in enumerate(tokens):
+        if token in ("(", "[", "{"):
+            depth += 1
+        elif token in (")", "]", "}"):
+            depth -= 1
+        elif token == "," and depth == 0:
+            yield tokens[start:i]
+            start = i + 1
+    yield tokens[start:]
+
+
+def _js_group(tokens, start):
+    depth = 0
+    for i in range(start, len(tokens)):
+        if tokens[i] in ("(", "[", "{"):
+            depth += 1
+        elif tokens[i] in (")", "]", "}"):
+            depth -= 1
+            if depth == 0:
+                return tokens[start + 1:i]
+    return []
+
+
+def _js_property(tokens, name):
+    for part in _js_parts(tokens):
+        if len(part) > 2 and part[0].strip("\"'") == name and part[1] == ":":
+            return part[2:]
+    return []
+
+
+def _js_tools(expression, tokens, filename, sources, seen=frozenset()):
+    """Resolve explicit arrays, local bindings and one-hop imported factories.
+
+    This counts statically supplied tools across modes, not framework defaults
+    or the tools active in one particular runtime invocation.
+    """
+    if not expression:
+        return []
+    if expression[0] == "[":
+        return [name for part in _js_parts(_js_group(expression, 0))
+                for name in _js_tools(part, tokens, filename, sources, seen)]
+    if expression[0] == "{":
+        names = []
+        for part in _js_parts(_js_group(expression, 0)):
+            if not part:
+                continue
+            value = part[2:] if len(part) > 2 and part[1] == ":" else part
+            if len(value) == 1 and re.fullmatch(r"[A-Za-z_$][\w$]*", value[0]):
+                names.append(value[0])
+            else:
+                names.extend(_js_tools(value, tokens, filename, sources, seen))
+        return names
+    if expression[0] == "...":
+        return _js_tools(expression[1:], tokens, filename, sources, seen)
+    if expression[:1] == ["new"] and len(expression) > 3 and expression[3] == "{":
+        name = _js_property(_js_group(expression, 3), "name")
+        return [name[0][1:-1]] if name and name[0].startswith(("'", '\"')) else []
+    name = expression[0]
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+        return []
+    key = (filename, name)
+    if key in seen:
+        return []
+    seen = seen | {key}
+    is_call = len(expression) > 1 and expression[1] == "("
+    for i, token in enumerate(tokens):
+        if token in ("const", "let", "var") and tokens[i + 1:i + 3] == [name, "="]:
+            value = next(_js_parts(tokens[i + 3:]))
+            return _js_tools(value, tokens, filename, sources, seen)
+        if is_call and token == "function" and tokens[i + 1:i + 3] == [name, "("]:
+            params = _js_group(tokens, i + 2)
+            body_start = i + 4 + len(params)
+            # Skip a simple TypeScript return annotation (e.g. Tool[]).
+            while body_start < len(tokens) and tokens[body_start] != "{":
+                body_start += 1
+            body = _js_group(tokens, body_start)
+            tools, depth = [], 0
+            for j, value in enumerate(body):
+                if value == "return" and depth == 0 and body[j + 1:j + 2] == ["["]:
+                    tools.extend(_js_tools(body[j + 1:], body, filename, sources, seen))
+                if value in ("(", "[", "{"):
+                    depth += 1
+                elif value in (")", "]", "}"):
+                    depth -= 1
+            return tools
+        if token == "import" and tokens[i + 1:i + 2] == ["{"]:
+            imports = _js_group(tokens, i + 1)
+            tail = tokens[i + len(imports) + 3:i + len(imports) + 5]
+            if len(tail) != 2 or tail[0] != "from" or not sources:
+                continue
+            for part in _js_parts(imports):
+                if not part or part[-1] != name:
+                    continue
+                module = tail[1][1:-1]
+                if not module.startswith("."):
+                    continue
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(filename), module))
+                stem = posixpath.splitext(target)[0]
+                for path in (target, stem + ".ts", stem + ".tsx", target + ".ts", target + "/index.ts"):
+                    if path in sources:
+                        imported = [m.group() for m in _js_tokens(sources[path])]
+                        return _js_tools([part[0], *expression[1:]], imported, path, {}, seen)
+    # Match Python's explicit-list behavior for unresolved tool variables.
+    return [] if is_call else [name]
+
+
+# Confirmed JS/TS tool-DEFINITION detection, independent of agent detection.
+#
+# Covers two shapes neither `_js_tools` above (which resolves tools BOUND to
+# an already-detected agent) nor the plain-text `_TOOL_DEFINITION_MARKER_PATTERN`
+# markers (unconfirmed, never counted) can see:
+#   1. A plain-object MCP tool registry (`{name, description, inputSchema}`
+#      objects assembled into an array via imports/spreads, e.g. Mastra-less
+#      hand-rolled MCP servers) that is actually served through an MCP
+#      tools/list or dispatch handler, following the catalog's imports --
+#      object shape alone is NOT enough; the handler must reference it.
+#   2. A tool object passed to WebMCP's `provider.registerTool(tool, ...)`,
+#      whose `name` may be a string literal or a member expression referring
+#      to an imported name constant (`WEBMCP_SPA_TOOL.openCountryBrief`).
+_TOOL_SCHEMA_KEYS = {"inputSchema", "parameters", "schema"}
+_TOOL_SHAPE_KEYS = {"description", "execute"} | _TOOL_SCHEMA_KEYS
+_MCP_DISPATCH_MARKER_RE = re.compile(
+    r"['\"]tools/list['\"]|\b(?:ListToolsRequestSchema|CallToolRequestSchema)\b"
+)
+# Naming convention for an assembled MCP tool CATALOG specifically --
+# TOOL_REGISTRY, TOOLS_REGISTRY, a bare TOOLS, or anything ending in
+# `_REGISTRY`. Deliberately does NOT match `CACHE_TOOLS`/`RPC_TOOLS`-style
+# per-category arrays (a bare `*_TOOLS` suffix): those are reached anyway,
+# via this same identifier's spread resolution once the enclosing registry
+# is found, and independently treating each of THEM as its own entry point
+# double-counts every tool once per sub-array's own file, confirmed against
+# WorldMonitor's actual layout (`rpc-tools.ts`/`nlp-tools.ts` each mention
+# "tools/list" in their own doc comments, which would otherwise make them
+# false standalone entry points).
+_JS_TOOL_REGISTRY_NAME_RE = re.compile(r"\b(?:[A-Z][A-Z0-9]*_)*REGISTRY\b|\bTOOLS\b")
+
+
+def _js_tool_def_object_name(obj_tokens, tokens, filename, sources, seen):
+    """Return a tool-shaped object's statically resolved string name."""
+    keys, name_val = set(), None
+    for part in _js_parts(obj_tokens):
+        if len(part) > 2 and part[1] == ":":
+            key = part[0].strip("\"'")
+            keys.add(key)
+            if key == "name":
+                name_val = part[2:]
+        elif len(part) == 1:
+            keys.add(part[0])
+    if "name" not in keys or not (keys & _TOOL_SHAPE_KEYS) or not name_val:
+        return None
+    if len(name_val) == 1 and name_val[0][:1] in ("'", '"'):
+        return name_val[0][1:-1]
+    names = _js_tool_registry_names(name_val, tokens, filename, sources, seen, literal_name=True)
+    return names[0] if names else None
+
+
+
+def _js_skip_type_annotation(tokens, i):
+    """`i` points just past a declared variable's name. If a TS type
+    annotation follows (`: ToolDef[]`), skip past it and return the index of
+    the `=` that follows; otherwise `i` already points at (or past) `=`."""
+    if tokens[i:i + 1] != [":"]:
+        return i
+    depth = 0
+    j = i + 1
+    while j < len(tokens):
+        t = tokens[j]
+        if t in ("<", "(", "[", "{"):
+            depth += 1
+        elif t in (">", ")", "]", "}"):
+            depth -= 1
+        elif t == "=" and depth <= 0:
+            return j
+        j += 1
+    return j
+
+
+def _js_tool_registry_names(expression, tokens, filename, sources, seen, literal_name=False):
+    """
+    Resolve an assembled tool-registry array to its members' literal names:
+    array literals, `...spread` of another array (same-file or imported),
+    and object-literal tool definitions. Recurses across import hops (unlike
+    `_js_tools`, which only follows one hop) because a real registry is
+    typically assembled in one file from arrays defined in others, e.g.
+    `TOOL_REGISTRY = [...CACHE_TOOLS, ...RPC_TOOLS]` where each of those is
+    itself imported from its own module.
+    """
+    if not expression:
+        return []
+    if literal_name and expression[0][:1] in ("'", '"'):
+        return [expression[0][1:-1]] if len(expression) == 1 or expression[1] in (";", "as") else []
+    if literal_name and expression[0] == "{":
+        return []
+    if expression[0] == "[":
+        return [name for part in _js_parts(_js_group(expression, 0))
+                for name in _js_tool_registry_names(part, tokens, filename, sources, seen)]
+    if expression[0] == "{":
+        name = _js_tool_def_object_name(_js_group(expression, 0), tokens, filename, sources, seen)
+        return [name] if name else []
+    if expression[0] == "...":
+        return _js_tool_registry_names(expression[1:], tokens, filename, sources, seen)
+    name = expression[0]
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", name):
+        return []
+    key = (filename, name)
+    if key in seen:
+        return []
+    seen = seen | {key}
+    for i, token in enumerate(tokens):
+        if token in ("const", "let", "var") and tokens[i + 1:i + 2] == [name]:
+            eq_idx = _js_skip_type_annotation(tokens, i + 2)
+            if tokens[eq_idx:eq_idx + 1] == ["="]:
+                value = next(_js_parts(tokens[eq_idx + 1:]))
+                if literal_name and value[:4] == ["Object", ".", "freeze", "("]:
+                    value = _js_group(value, 3)
+                if literal_name and len(expression) > 1:
+                    if expression[1:2] != ["."] or len(expression) != 3 or value[:1] != ["{"]:
+                        return []
+                    value = _js_property(_js_group(value, 0), expression[2])
+                return _js_tool_registry_names(value, tokens, filename, sources, seen, literal_name)
+        if token == "import" and tokens[i + 1:i + 2] == ["{"]:
+            imports = _js_group(tokens, i + 1)
+            tail = tokens[i + len(imports) + 3:i + len(imports) + 5]
+            if len(tail) != 2 or tail[0] != "from" or not sources:
+                continue
+            for part in _js_parts(imports):
+                if not part or part[-1] != name:
+                    continue
+                module = tail[1][1:-1]
+                if not module.startswith("."):
+                    continue
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(filename), module))
+                stem = posixpath.splitext(target)[0]
+                for path in (target, stem + ".ts", stem + ".tsx", target + ".ts", target + "/index.ts"):
+                    if path in sources:
+                        imported = [m.group() for m in _js_tokens(sources[path])]
+                        # Unlike `_js_tools`, keep passing `sources` (not `{}`)
+                        # so resolution can continue for further import hops
+                        # -- a registry assembled from several imported arrays
+                        # needs to follow each of THEM to their own files too.
+                        return _js_tool_registry_names([part[0], *expression[1:]], imported, path, sources, seen, literal_name)
+    # Unresolved: unlike `_js_tools`'s tool-binding fallback, an unresolved
+    # registry reference is NOT itself a tool name -- return nothing rather
+    # than guess.
+    return []
+
+
+_WEBMCP_REGISTER_TOOL_RE = re.compile(r"\bregisterTool\s*\(")
+
+
+def _js_registration_names(tokens, filename, sources):
+    """Trace registration arguments through local bindings, named wrappers,
+    map/forEach callbacks, for-of loops and factory returns (at most 12 hops).
+
+    Token positions and enclosing braces keep same-named local bindings apart.
+    Unsupported/computed expressions and cycles produce no confirmed names.
+    """
+    pairs, scopes, stack = {}, [], []
+    for i, token in enumerate(tokens):
+        scopes.append(tuple(j for j in stack if tokens[j] == "{"))
+        if token in ("(", "[", "{"):
+            stack.append(i)
+        elif token in (")", "]", "}") and stack:
+            start = stack.pop()
+            pairs[start] = i
+
+    def expression_at(start):
+        end = start
+        while end < len(tokens) and tokens[end] not in (";", ",", ")", "]", "}"):
+            end = pairs.get(end, end) + 1
+        return tokens[start:end]
+
+    # Type parameters can contain commas (e.g. Pick<Provider, 'registerTool'>).
+    def parameters(start, end):
+        names, depth, first = [], 0, True
+        for token in tokens[start:end]:
+            if first:
+                names.append(token)
+                first = False
+            if token in ("<", "(", "[", "{"):
+                depth += 1
+            elif token in (">", ")", "]", "}"):
+                depth -= 1
+            elif token == "," and depth == 0:
+                first = True
+        return names
+
+    functions, declarations, iterations = [], [], []
+    for i, token in enumerate(tokens):
+        if token == "function" and tokens[i + 2:i + 3] == ["("] and i + 2 in pairs:
+            close = pairs[i + 2]
+            body = close + 1
+            while body < len(tokens) and tokens[body] not in ("{", ";", "="):
+                body += 1
+            if body in pairs and tokens[body] == "{":
+                functions.append((tokens[i + 1], i + 1, body, pairs[body],
+                                  parameters(i + 3, close)))
+        if token in ("const", "let", "var") and i + 1 < len(tokens):
+            eq = _js_skip_type_annotation(tokens, i + 2)
+            if tokens[eq:eq + 1] == ["="]:
+                declarations.append((tokens[i + 1], i, eq + 1))
+        if (token in ("map", "forEach") and tokens[max(0, i - 1):i] == ["."]
+                and i >= 2 and re.fullmatch(r"[A-Za-z_$][\w$]*", tokens[i - 2])
+                and tokens[max(0, i - 3):i - 2] != ["."] and i + 1 in pairs):
+            # Bounded callback shape: collection.map((item) => ...).
+            arg = i + 2
+            if tokens[arg:arg + 1] == ["("] and arg in pairs:
+                arrow = pairs[arg] + 1
+                params = parameters(arg + 1, pairs[arg])
+                if params and tokens[arrow:arrow + 2] == ["=", ">"]:
+                    iterations.append((params[0], arrow + 2, pairs[i + 1], [tokens[i - 2]], i - 2))
+        if token == "for" and tokens[i + 1:i + 3] == ["(", "const"] and i + 1 in pairs:
+            close = pairs[i + 1]
+            if tokens[i + 4:i + 5] == ["of"] and tokens[close + 1:close + 2] == ["{"]:
+                iterations.append((tokens[i + 3], close + 1, pairs.get(close + 1, close + 1),
+                                   tokens[i + 5:close], i))
+
+    def visible(binding, use):
+        return scopes[use][:len(scopes[binding])] == scopes[binding]
+
+    def trace(expr, pos, seen=frozenset(), depth=0):
+        key = (tuple(expr), pos)
+        if not expr or depth >= 12 or key in seen:
+            return []
+        seen = seen | {key}
+
+        def follow(value, where):
+            return trace(value, where, seen, depth + 1)
+
+        if expr[0] in ("[", "{"):
+            # Restrict object/array resolution to declarations visible here.
+            local_tokens = []
+            for _, decl, value in declarations:
+                if decl < pos and visible(decl, pos):
+                    local_tokens.extend(tokens[decl:value] + expression_at(value) + [";"])
+            # Retain imports for statically resolved name constants.
+            for i, token in enumerate(tokens):
+                if token == "import":
+                    local_tokens.extend(expression_at(i) + [";"])
+            return _js_tool_registry_names(expr, local_tokens, filename, sources, frozenset())
+        if not re.fullmatch(r"[A-Za-z_$][\w$]*", expr[0]):
+            return []
+        name = expr[0]
+        if len(expr) > 1:
+            if expr[1] != "(":
+                return []
+            candidates = [f for f in functions if f[0] == name and visible(f[1], pos)]
+            if len(candidates) != 1:
+                return []
+            _, _, body, end, _ = candidates[0]
+            # Only direct returns from the factory body, not nested callbacks.
+            return [n for j in range(body + 1, end)
+                    if tokens[j] == "return" and scopes[j] == scopes[body] + (body,)
+                    for n in follow(expression_at(j + 1), j)]
+        for param, start, end, collection, where in reversed(iterations):
+            if param == name and start <= pos < end:
+                return follow(collection, where)
+        owners = [f for f in functions if f[2] < pos < f[3]]
+        owner = max(owners, key=lambda f: f[2]) if owners else None
+        candidates = [(decl, value) for var, decl, value in declarations
+                      if var == name and decl < pos and visible(decl, pos)
+                      and (owner is None or name not in owner[4] or decl > owner[2])]
+        if candidates:
+            decl, value = max(candidates, key=lambda d: (len(scopes[d[0]]), d[0]))
+            return follow(expression_at(value), value)
+        if owner and name in owner[4]:
+            param_index = owner[4].index(name)
+            names = []
+            for j, token in enumerate(tokens):
+                if (token != owner[0] or j == owner[1] or tokens[j + 1:j + 2] != ["("]
+                        or tokens[max(0, j - 1):j] == ["."] or not visible(owner[1], j)):
+                    continue
+                args = list(_js_parts(_js_group(tokens, j + 1)))
+                if param_index < len(args):
+                    names.extend(follow(args[param_index], j))
+            return names
+        return []
+
+    for i, token in enumerate(tokens):
+        if (token == "registerTool" and tokens[max(0, i - 1):i] == ["."]
+                and tokens[i + 1:i + 2] == ["("]):
+            arg = next(_js_parts(_js_group(tokens, i + 1)), [])
+            yield i, trace(arg, i)
+
+
+def _detect_webmcp_tool_definitions(source_lines, filename, sources):
+    """Confirm tool objects connected to registration by bounded local flow."""
+    source = "\n".join(source_lines)
+    if not _WEBMCP_REGISTER_TOOL_RE.search(source):
+        return []
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    hits, seen_names = [], set()
+
+    def add(name, pos):
+        if name and name not in seen_names:
+            seen_names.add(name)
+            hits.append({
+                # registerTool is shared by WebMCP, Pi, OpenClaw and others;
+                # the method name confirms no particular framework.
+                "name": name, "framework": None,
+                "line": source.count("\n", 0, pos) + 1,
+                "matched_call": "registerTool(",
+            })
+
+    for i, names in _js_registration_names(tokens, filename, sources or {}):
+        for name in names:
+            add(name, matches[i].start())
+
+    return hits
+
+
+def _detect_js_registry_tool_definitions(source_lines, filename, sources):
+    """Confirm the catalog value served in an MCP handler, following imports
+    and registry projections, or a named registry used in a marked lookup.
+    Markers in comments and unused/sibling registries do not establish usage.
+    """
+    source = "\n".join(source_lines)
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    executable = " ".join(tokens)
+    if not _MCP_DISPATCH_MARKER_RE.search(executable):
+        return []
+    hits, seen_names = [], set()
+    for i, m in enumerate(matches):
+        ident = m.group()
+        # Follow the actual catalog value, including imported projections such
+        # as TOOL_LIST_RESPONSE = TOOL_REGISTRY.map(...). No sibling-file marker
+        # search: only the value served by the handler establishes this link.
+        catalog_value = tokens[max(0, i - 2):i] == ["tools", ":"]
+        lookup = (_JS_TOOL_REGISTRY_NAME_RE.fullmatch(ident)
+                  and tokens[i + 1:i + 4] == [".", "find", "("])
+        if not (catalog_value or lookup):
+            continue
+        for name in _js_tool_registry_names([ident], tokens, filename, sources or {}, frozenset()):
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            hits.append({
+                "name": name, "framework": "MCP SDK",
+                "line": source.count("\n", 0, m.start()) + 1,
+                "matched_call": ident,
+            })
+    return hits
+
+
+# MCP SDK `server.tool("name", ...)`/`server.registerTool("name", ...)`:
+# requires an MCP SDK import and a static string name.
+_JS_MCP_SDK_MODULE_RE = re.compile(r"^['\"`]@modelcontextprotocol/")
+_JS_MCP_SERVER_TOOL_METHODS = {"tool", "registerTool"}
+
+
+def _js_string_value(token):
+    """A string literal token's value, or None if interpolated."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"`":
+        if token[0] == "`" and "${" in token:
+            return None
+        return token[1:-1]
+    return None
+
+
+def _detect_js_mcp_server_tool_definitions(source_lines):
+    """Confirm MCP SDK tool registrations with a literal or same-file const name."""
+    source = "\n".join(source_lines)
+    if "@modelcontextprotocol/" not in source:
+        return []
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    if not any(
+        _JS_MCP_SDK_MODULE_RE.match(token)
+        and (tokens[i - 1:i] in (["from"], ["import"]) or tokens[max(0, i - 2):i] == ["require", "("])
+        for i, token in enumerate(tokens)
+    ):
+        return []
+    constants = {}
+    for i, token in enumerate(tokens):
+        if token == "const" and tokens[i + 2:i + 3] == ["="] and tokens[i + 4:i + 5] in ([";"], [","], []):
+            value = _js_string_value(tokens[i + 3]) if i + 3 < len(tokens) else None
+            if value is not None:
+                constants.setdefault(tokens[i + 1], value)
+    hits, seen_names = [], set()
+    for i, token in enumerate(tokens):
+        if (token not in _JS_MCP_SERVER_TOOL_METHODS or tokens[i - 1:i] != ["."]
+                or tokens[i + 1:i + 2] != ["("]):
+            continue
+        first = next(_js_parts(_js_group(tokens, i + 1)), [])
+        if len(first) != 1:
+            continue
+        name = _js_string_value(first[0])
+        if name is None:
+            name = constants.get(first[0])
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        hits.append({
+            "name": name, "framework": "MCP SDK",
+            "line": source.count("\n", 0, matches[i].start()) + 1,
+            "matched_call": f"{token}(",
+        })
+    return hits
+
+
+# HTTP-agent option hints for otherwise unresolved constructors.
+# Known HTTP imports are excluded independently of their options.
+_UNDICI_AGENT_OPTION_KEYS = {
+    "headersTimeout", "bodyTimeout", "connect", "pipelining",
+    "keepAliveTimeout", "keepAliveMaxTimeout", "connections", "factory",
+    "maxHeaderSize", "maxResponseSize",
+}
+
+
+# These ordinary function names need callee-level import confirmation.
+_JS_PACKAGE_REQUIRED = {
+    "Claude Agent SDK": ("@anthropic-ai/claude-agent-sdk", "@anthropic-ai/claude-code"),
+    "Pi": ("@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent",
+           "@earendil-works/pi-agent-core", "@mariozechner/pi-agent-core"),
+}
+_JS_AGENT_EXPORTS = {
+    "Claude Agent SDK": {"query"},
+    "Pi": {"createAgentSession", "createAgentSessionFromServices", "createAgentSessionRuntime",
+           "agentLoop", "agentLoopContinue", "runAgentLoop", "runAgentLoopContinue"},
+}
+
+# A parenthesized head belonging to one of these is control flow, not a
+# function parameter list -- `for await (const m of query({...})) {` reads
+# exactly like `(params) {` to a token scanner, and treating it as one marked
+# every binding used inside it as shadowed. That silently zeroed the Agent
+# SDK's own streaming idiom, which is how most of its call sites are written.
+_JS_CONTROL_FLOW_HEADS = {"if", "for", "while", "switch", "await"}
+
+
+def _js_sdk_agent_calls(tokens):
+    """Resolve direct SDK calls from named/namespace imports and module loads.
+
+    This deliberately handles only explicit bindings. Reassigned or shadowed
+    names are rejected conservatively throughout the file. Module-load bindings
+    are visible only in their enclosing brace scopes; this is not a full
+    JavaScript control-flow or scope resolver.
+    """
+    bindings, import_tokens, require_binding_positions = {}, set(), set()
+    pairs, scopes, stack = {}, [], []
+    for i, token in enumerate(tokens):
+        scopes.append(tuple(j for j in stack if tokens[j] == "{"))
+        if token in ("(", "[", "{"):
+            stack.append(i)
+        elif token in (")", "]", "}") and stack:
+            pairs[stack.pop()] = i
+
+    def binding_names(pattern):
+        # Only binding positions count: object keys, types and default-value
+        # expressions can refer to the SDK without declaring its name.
+        if not pattern:
+            return set()
+        if pattern[0] == "...":
+            return binding_names(pattern[1:])
+        if pattern[0] == "{":
+            names = set()
+            for part in _js_parts(_js_group(pattern, 0)):
+                if len(part) > 1 and part[1] == ":":
+                    part = part[2:]
+                names.update(binding_names(part))
+            return names
+        if pattern[0] == "[":
+            return set().union(*(binding_names(part) for part in
+                                 _js_parts(_js_group(pattern, 0))))
+        return {pattern[0]} if re.fullmatch(r"[A-Za-z_$][\w$]*", pattern[0]) else set()
+
+    def register(parts, label, position, namespace=False, commonjs=False):
+        def add(local, exported):
+            bindings.setdefault(local, []).append(
+                (label, exported, scopes[position], position))
+        if namespace:
+            if len(parts) == 1:
+                add(parts[0], None)
+            return
+        for part in _js_parts(parts):
+            separator = ":" if commonjs else "as"
+            if len(part) == 1:
+                exported = local = part[0]
+            elif len(part) == 3 and part[1] == separator:
+                exported, local = part[0], part[2]
+            else:
+                continue  # includes type-only imports
+            if exported in _JS_AGENT_EXPORTS[label]:
+                add(local, exported)
+
+    def framework(spec):
+        if not spec.startswith(("'", '"')):
+            return None
+        return next((label for label, packages in _JS_PACKAGE_REQUIRED.items()
+                     if spec[1:-1] in packages), None)
+
+    for i, token in enumerate(tokens):
+        if token == "import" and tokens[i + 1:i + 2] == ["{"]:
+            parts = _js_group(tokens, i + 1)
+            end = i + len(parts) + 3
+            if tokens[end:end + 1] == ["from"] and end + 1 < len(tokens):
+                label = framework(tokens[end + 1])
+                if label:
+                    register(parts, label, i)
+                    import_tokens.update(range(i, end + 2))
+        elif (token == "import" and tokens[i + 1:i + 3] == ["*", "as"]
+              and tokens[i + 4:i + 5] == ["from"] and i + 5 < len(tokens)):
+            label = framework(tokens[i + 5])
+            if label:
+                register([tokens[i + 3]], label, i, namespace=True)
+                import_tokens.update(range(i, i + 6))
+        elif token in {"const", "let", "var"}:
+            end = i + 2
+            parts = tokens[i + 1:i + 2]
+            destructured = parts == ["{"]
+            if destructured:
+                parts = _js_group(tokens, i + 1)
+                end = i + len(parts) + 3
+            if tokens[end:end + 1] != ["="]:
+                continue
+            load = end + 1
+            awaited = tokens[load:load + 1] == ["await"]
+            if awaited:
+                load += 1
+            if (tokens[load:load + 1] not in (["require"], ["import"])
+                    or tokens[load + 1:load + 2] != ["("]
+                    or tokens[load + 3:load + 4] != [")"]):
+                continue
+            if tokens[load] == "import" and not awaited:
+                continue  # import() yields a Promise, not the SDK namespace
+            if tokens[load + 4:load + 5] in (["."], ["["]):
+                continue  # a projected value is not the module namespace
+            label = framework(tokens[load + 2])
+            if label:
+                register(parts, label, i, namespace=not destructured, commonjs=True)
+                import_tokens.update(range(i, load + 4))
+                if tokens[load] == "require":
+                    require_binding_positions.add(i)
+
+    invalid = set()
+    declaration_names = set()
+    for i, token in enumerate(tokens):
+        if i in import_tokens:
+            continue
+        if token in {"const", "let", "var"}:
+            # Walk all declarators, jumping over initializer expressions.
+            start = i + 1
+            while start < len(tokens):
+                end = pairs.get(start, start) + 1
+                declaration_names.update(binding_names(tokens[start:end]))
+                j = end
+                while j < len(tokens) and tokens[j] not in {";", ",", ")", "}", "of", "in"}:
+                    j = pairs.get(j, j) + 1
+                if tokens[j:j + 1] != [","]:
+                    break
+                start = j + 1
+        if token in bindings and tokens[i - 1:i] != ["."]:
+            # Mutating a namespace export also removes its SDK identity.
+            if (tokens[i + 1:i + 2] == ["."]
+                    and tokens[i + 3:i + 4] == ["="]
+                    and tokens[i + 4:i + 5] not in (["="], [">"])
+                    and any(exported is None and tokens[i + 2] in _JS_AGENT_EXPORTS[label]
+                            for label, exported, _, _ in bindings[token])):
+                invalid.add(token)
+            if (tokens[i + 1:i + 2] == ["["]
+                    and tokens[i + 3:i + 5] == ["]", "="]
+                    and tokens[i + 4:i + 6] != ["=", "="]
+                    and any(exported is None and tokens[i + 2].strip("\"'") in _JS_AGENT_EXPORTS[label]
+                            for label, exported, _, _ in bindings[token])):
+                invalid.add(token)
+            if (tokens[i - 1:i] in (["function"], ["class"])
+                    or (tokens[i + 1:i + 2] == ["="]
+                        and tokens[i + 2:i + 3] != ["="])):
+                invalid.add(token)
+        if token == "(" and tokens[i - 1:i] not in ([kw] for kw in _JS_CONTROL_FLOW_HEADS):
+            end = pairs.get(i, i) + 1
+            parameter_end = end - 1
+            # TS functions/arrows may have a return annotation before their
+            # body. Do not mistake a typed shadow parameter for an SDK import.
+            if tokens[end:end + 1] == [":"]:
+                end += 1
+                angle = 0
+                while end < len(tokens):
+                    if angle == 0 and (tokens[end] in {"{", ";", "}"}
+                                       or tokens[end:end + 2] == ["=", ">"]):
+                        break
+                    angle += (tokens[end] == "<") - (tokens[end] == ">")
+                    end = pairs.get(end, end) + 1
+            if tokens[end:end + 1] == ["{"] or tokens[end:end + 2] == ["=", ">"]:
+                for part in _js_parts(tokens[i + 1:parameter_end]):
+                    declaration_names.update(binding_names(part))
+    invalid.update(declaration_names.intersection(bindings))
+    # require() can itself be a parameter/local function. A call to that
+    # replacement is not evidence that Node loaded the named SDK package.
+    if "require" in declaration_names or any(
+            token == "require" and (tokens[i - 1:i] == ["function"]
+                                    or tokens[i + 1:i + 2] == ["="])
+            for i, token in enumerate(tokens)):
+        for local, entries in bindings.items():
+            if any(position in require_binding_positions
+                   for _, _, _, position in entries):
+                invalid.add(local)
+
+    calls = {}
+    for i, token in enumerate(tokens):
+        if token not in bindings or token in invalid or i in import_tokens:
+            continue
+        if tokens[max(0, i - 1):i] in (["."], ["function"], ["new"]):
+            continue
+        visible = [binding for binding in bindings[token]
+                   if scopes[i][:len(binding[2])] == binding[2]
+                   and (tokens[binding[3]] == "import" or binding[3] < i)]
+        if not visible:
+            continue
+        label, exported, _, _ = max(visible, key=lambda binding: (len(binding[2]), binding[3]))
+        opening = i + 1
+        if exported is None:
+            if (tokens[i + 1:i + 2] != ["."] or i + 2 >= len(tokens)
+                    or tokens[i + 2] not in _JS_AGENT_EXPORTS[label]):
+                continue
+            opening = i + 3
+        if tokens[opening:opening + 1] == ["("]:
+            end = opening + len(_js_group(tokens, opening)) + 2
+            # Typed methods put a return annotation between ')' and '{'.
+            # Require a declaration prefix so ternaries/case labels containing
+            # actual calls (e.g. condition ? query(...) : other) still count.
+            typed_method = (tokens[end:end + 1] == [":"] and exported is not None
+                            and i > 0 and tokens[i - 1] in {
+                                "{", "}", ";", ",", "*", "async", "static",
+                                "public", "private", "protected", "override", "abstract",
+                            })
+            if tokens[end:end + 1] == ["{"] or typed_method:
+                continue  # method/function declaration, not a call
+            calls[opening] = (i, label)
+    return calls
+
+
+def _detect_js_named_agents(source_lines, agent_creation_category, allowed_langs_by_fw,
+                            filename="", javascript_sources=None):
+    if agent_creation_category is None:
+        return []
+    source = "\n".join(source_lines)
+    matches = _js_tokens(source)
+    tokens = [m.group() for m in matches]
+    # Preserve offsets and line numbers while hiding non-code evidence.
+    code = list(re.sub(r"[^\n]", " ", source))
+    for m in matches:
+        if not m.group().startswith(("'", '\"', "`", "/")):
+            code[m.start():m.end()] = m.group()
+    code = "".join(code)
+    has_mastra_agent = False
+    has_http_agent = False
+    for i, token in enumerate(tokens):
+        if token != "import" or tokens[i + 1:i + 2] != ["{"]:
+            continue
+        imports = _js_group(tokens, i + 1)
+        tail = tokens[i + len(imports) + 3:i + len(imports) + 5]
+        if (len(tail) == 2 and tail[0] == "from"
+                and tail[1][1:-1] in {"undici", "http", "https", "node:http", "node:https"}
+                and any(part[-1:] == ["Agent"] for part in _js_parts(imports))):
+            has_http_agent = True
+        if (len(tail) == 2 and tail[0] == "from"
+                and tail[1][1:-1] in ("@mastra/core", "@mastra/core/agent")
+                and any(part == ["Agent"] for part in _js_parts(imports))):
+            has_mastra_agent = True
+    has_graph_context = bool(_JS_GRAPH_COMPILE_CONTEXT_RE.search(code))
+    call_tokens = {m.start(): i for i, m in enumerate(matches) if m.group() == "("}
+    hits, seen = [], set()
+    for opening, (start, label) in _js_sdk_agent_calls(tokens).items():
+        if label not in agent_creation_category.frameworks:
+            continue
+        args = _js_group(tokens, opening)
+        options = _js_group(args, 0) if args[:1] == ["{"] else []
+        hits.append({
+            "name": None, "framework": label,
+            "line": source.count("\n", 0, matches[start].start()) + 1,
+            "matched_call": source[matches[start].start():matches[opening].end()],
+            "tools_bound": _js_tools(_js_property(options, "tools"), tokens,
+                                     filename, javascript_sources),
+        })
+        seen.add(matches[opening].start())
+    for pattern_str, label, regex, _is_generic in agent_creation_category._ranked:
+        allowed_langs = allowed_langs_by_fw.get(label)
+        # new McpServer(/new Server( creates a tool-exposing server, not an LLM agent -- excluded from n_agents
+        if label == "MCP SDK" or (allowed_langs is not None and "javascript" not in allowed_langs):
+            continue
+        if label in _JS_PACKAGE_REQUIRED:
+            continue
+        if "(" not in pattern_str:
+            continue
+        bare_new_agent = label == "Mastra" and pattern_str.startswith("new Agent")
+        for m in regex.finditer(code):
+            opening = code.find("(", m.start(), m.end())
+            if opening not in call_tokens or opening in seen:
+                continue
+            if re.fullmatch(r"\.compile\s*\(", m.group().strip()) and not has_graph_context:
+                continue
+            seen.add(opening)
+            args = _js_group(tokens, call_tokens[opening])
+            options = _js_group(args, 0) if args[:1] == ["{"] else []
+            hit_label = label
+            if bare_new_agent and has_http_agent:
+                continue
+            if bare_new_agent and not has_mastra_agent:
+                # Inspect all arguments: AI configuration can be positional,
+                # shorthand, or nested under initialState. String/comment text
+                # does not match these exact identifier tokens.
+                if any(_js_property(options, key) for key in _UNDICI_AGENT_OPTION_KEYS):
+                    continue
+                if not set(args).intersection({
+                        "model", "modelId", "tools", "systemPrompt", "system",
+                        "instructions", "messages", "provider", "providerId", "apiKey"}):
+                    continue
+                hit_label = "Custom"
+            hits.append({
+                "name": None, "framework": hit_label,
+                "line": source.count("\n", 0, m.start()) + 1,
+                "matched_call": m.group().strip(),
+                "tools_bound": _js_tools(_js_property(options, "tools"), tokens,
+                                         filename, javascript_sources),
+            })
+    return sorted(hits, key=lambda hit: hit["line"])
+
+
 def _detect_tool_use_markers(source_lines):
     return _scan_line_markers(source_lines, _TOOL_USE_MARKER_PATTERN)
 
@@ -837,6 +2141,38 @@ def _detect_tool_use_markers(source_lines):
 def _detect_agent_markers(source_lines):
     return _scan_line_markers(source_lines, _AGENT_MARKER_PATTERN)
 
+
+def _detect_tool_definition_markers(source_lines):
+    return _scan_line_markers(source_lines, _TOOL_DEFINITION_MARKER_PATTERN)
+
+
+# `.bind_tools(`/`.bindTools(` -- LangChain's API for handing tools to a
+# model outside its packaged agent constructors.
+_BIND_TOOLS_RE = re.compile(r"\b(\w+)\.(?:bind_tools|bindTools)\s*\(")
+_JS_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _extract_js_bind_tools_names(text, call_end):
+    """Extract identifiers from a same-line literal tool array."""
+    m = re.match(r"\s*\[([^\]]*)\]", text[call_end:])
+    if not m:
+        return None
+    names = [tok.strip() for tok in m.group(1).split(",")]
+    names = [n for n in names if _JS_IDENTIFIER_RE.fullmatch(n)]
+    return names or None
+
+
+def _detect_bind_tools_calls(source_lines):
+    hits = []
+    for idx, text in enumerate(source_lines, start=1):
+        m = _BIND_TOOLS_RE.search(text)
+        if m:
+            hits.append({
+                "line": idx, "variable": m.group(1), "framework": "LangChain",
+                "matched_call": m.group(0).strip(),
+                "tool_names": _extract_js_bind_tools_names(text, m.end()),
+            })
+    return hits
 
 
 def _canonical_call_text(func_node, import_aliases):
@@ -873,10 +2209,39 @@ def _canonical_call_text(func_node, import_aliases):
     return None
 
 
-def _reduce_python(source, agent_creation_category, rag_creation_category, rag_writes_category, rag_reads_category=None, agent_calls_category=None, external_exports=None):
+def _group_custom_agents(llm_tool_calls):
+    """
+    Collapses per-CALL llm_tool_calls entries into one entry per distinct
+    (client variable) -- a hand-rolled agent that loops and calls
+    `.create(tools=...)` many times must count as ONE agent, not one per
+    call. Mirrors how named_agents already counts one entry per creation
+    site rather than per later `.run()` call.
+    """
+    agents_by_var = {}
+    ordered = []
+    for t in llm_tool_calls:
+        var = t["variable"]
+        entry = agents_by_var.get(var)
+        if entry is None:
+            entry = {
+                "variable": var, "framework": t["framework"], "line": t["line"],
+                "matched_call": t.get("matched_call"), "tool_names": set(),
+            }
+            agents_by_var[var] = entry
+            ordered.append(entry)
+        if t.get("tool_names"):
+            entry["tool_names"].update(t["tool_names"])
+    for entry in ordered:
+        entry["tool_names"] = sorted(entry["tool_names"]) if entry["tool_names"] else None
+    return ordered
+
+
+def _reduce_python(source, agent_creation_category, rag_creation_category, rag_writes_category, rag_reads_category=None, agent_calls_category=None, tool_definition_category=None, external_exports=None):
     """
     Returns (reduced_text, parse_error, named_agents, named_stores,
-    store_agent_links, tainted_writes).
+    store_agent_links, tainted_writes, write_sites, read_sites, call_sites,
+    imports, llm_tool_calls, tool_use_markers, agent_markers,
+    confirmed_tool_definitions).
     """
     try:
         tree = ast.parse(source)
@@ -887,14 +2252,36 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
 
     source_lines = source.splitlines()
     import_aliases = _build_import_aliases(tree)
+    # The newly supported query() name is especially common. Apply the same
+    # conservative file-wide shadow/reassignment policy as the JS SDK pass.
+    sdk_aliases = {name for name, canonical in import_aliases.items()
+                   if canonical.split(".")[0] in {"claude_agent_sdk", "claude_code_sdk"}}
+    for node in ast.walk(tree):
+        shadow = None
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadow = node.name
+        elif isinstance(node, ast.arg):
+            shadow = node.arg
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            shadow = node.id
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if isinstance(node.value, ast.Name):
+                shadow = node.value.id
+        if shadow in sdk_aliases:
+            import_aliases.pop(shadow, None)
     extra_agent_classes, extra_store_classes = _build_subclass_extensions(
         tree, agent_creation_category, rag_creation_category, import_aliases
     )
+    llm_client_factory_functions = _build_llm_client_factory_functions(tree, import_aliases)
+    llm_client_wrapper_classes = _build_llm_client_wrapper_classes(tree, import_aliases)
+    llm_env_var_classes = _build_llm_env_var_classes(tree)
 
     lines = []
     pending_agent_calls = {}
     pending_store_calls = {}
     pending_llm_clients = {}
+    pending_tool_def_calls = {}
+    confirmed_tool_definitions = []
     assign_target_for_call = {}
     assigns_by_func_and_name = {}  # (func_ctx, var_name) -> most recent Assign.value node
 
@@ -911,8 +2298,9 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             for alias in node.names:
                 lines.append(f"from {module} import {alias.name}")
         elif isinstance(node, ast.Call):
+            callee = _unwrap_subscript_callee(node.func)
             try:
-                func_repr = ast.unparse(node.func)
+                func_repr = ast.unparse(callee)
             except Exception:
                 continue
             call_text = f"{func_repr}("
@@ -940,25 +2328,30 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # separately defining its own unrelated local `class Workflow`,
             # previously had that unrelated Workflow() wrongly confirmed as
             # Agno purely because Agno appeared elsewhere in the file.
-            call_frameworks = _frameworks_for_call_identifier(node.func, import_aliases)
+            call_frameworks = _frameworks_for_call_identifier(callee, import_aliases)
             # Canonical (fully-qualified) form of this call, via the file's
             # own imports -- lets a locally-renamed import still match a
             # registry pattern written in qualified form. See
             # _canonical_call_text.
-            canonical_text = _canonical_call_text(node.func, import_aliases)
+            canonical_text = _canonical_call_text(callee, import_aliases)
             framework = None
             if agent_creation_category is not None:
                 framework = _match_constructor_text(call_text, agent_creation_category, call_frameworks)
                 if framework is None and canonical_text:
                     framework = _match_constructor_text(canonical_text, agent_creation_category, call_frameworks)
-            if framework is None and isinstance(node.func, ast.Name):
-                framework = extra_agent_classes.get(node.func.id)
+                if framework is not None and _is_non_agent_compile_call(callee, import_aliases):
+                    framework = None
+            if framework is None and isinstance(callee, ast.Name):
+                framework = extra_agent_classes.get(callee.id)
             if framework is not None:
                 pending_agent_calls[id(node)] = {
                     "framework": framework,
                     "name": _extract_name_kwarg(node),
                     "line": node.lineno,
-                    "tools_bound": _extract_tools_bound(node),
+                    "tools_bound": _extract_tools_bound(
+                        node, assigns_by_func_and_name, func_ctx, callee_name=_callee_simple_name(callee),
+                        import_aliases=import_aliases,
+                    ),
                     "call_node": node,
                     "matched_call": call_text,  # e.g. "SolidAssistantAgent(" -- so you can eyeball-confirm the match
                 }
@@ -970,8 +2363,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 store_framework = _match_constructor_text(call_text, rag_creation_category, call_frameworks)
                 if store_framework is None and canonical_text:
                     store_framework = _match_constructor_text(canonical_text, rag_creation_category, call_frameworks)
-            if store_framework is None and isinstance(node.func, ast.Name):
-                store_framework = extra_store_classes.get(node.func.id)
+            if store_framework is None and isinstance(callee, ast.Name):
+                store_framework = extra_store_classes.get(callee.id)
             if store_framework is not None:
                 pending_store_calls[id(node)] = {
                     "framework": store_framework,
@@ -980,21 +2373,48 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     "matched_call": call_text,
                 }
 
+            if tool_definition_category is not None:
+                tool_def_framework = _match_constructor_text(call_text, tool_definition_category, call_frameworks)
+                if tool_def_framework is None and canonical_text:
+                    tool_def_framework = _match_constructor_text(canonical_text, tool_definition_category, call_frameworks)
+                if tool_def_framework is not None:
+                    pending_tool_def_calls[id(node)] = {
+                        "framework": tool_def_framework,
+                        "line": node.lineno,
+                        "matched_call": call_text,
+                    }
+
             # LLM SDK client creation (Option A foundation): confirms which
             # variable is a real OpenAI/Anthropic client, so a later
             # `.chat.completions.create(tools=...)` on it can be trusted as
             # genuine tool-calling evidence rather than a guess. Same
             # per-identifier import confirmation as everything else here.
-            llm_client_name = (
-                node.func.id if isinstance(node.func, ast.Name)
-                else node.func.attr if isinstance(node.func, ast.Attribute)
-                else None
-            )
+            llm_client_name = _llm_constructor_name(callee, import_aliases)
             if llm_client_name in LLM_CLIENT_CONSTRUCTORS and LLM_CLIENT_CONSTRUCTORS[llm_client_name] in call_frameworks:
                 pending_llm_clients[id(node)] = {
                     "framework": LLM_CLIENT_CONSTRUCTORS[llm_client_name],
                     "line": node.lineno,
                 }
+            elif llm_client_name in llm_client_factory_functions:
+                pending_llm_clients[id(node)] = {
+                    "framework": llm_client_factory_functions[llm_client_name],
+                    "line": node.lineno,
+                }
+            elif llm_client_name in llm_client_wrapper_classes:
+                pending_llm_clients[id(node)] = {
+                    "framework": llm_client_wrapper_classes[llm_client_name],
+                    "line": node.lineno,
+                }
+            else:
+                # Fallback evidence; request paths are checked below.
+                env_provider = _call_references_llm_env_var(node)
+                if env_provider is None and isinstance(callee, ast.Name):
+                    env_provider = llm_env_var_classes.get(callee.id)
+                if env_provider is not None:
+                    pending_llm_clients[id(node)] = {
+                        "framework": f"Custom ({env_provider})",
+                        "line": node.lineno,
+                    }
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             for dec in node.decorator_list:
@@ -1002,10 +2422,57 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     lines.append(f"@{ast.unparse(dec)}")
                 except Exception:
                     continue
+                if (tool_definition_category is not None
+                        and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                    dec_func = dec.func if isinstance(dec, ast.Call) else dec
+                    dec_frameworks = _frameworks_for_call_identifier(dec_func, import_aliases)
+                    dec_text = f"@{_resolve_expr_text(dec_func)}"
+                    dec_fw = _match_constructor_text(dec_text, tool_definition_category, dec_frameworks)
+                    if dec_fw is None:
+                        canonical_dec = _canonical_call_text(dec_func, import_aliases)
+                        if canonical_dec:
+                            dec_fw = _match_constructor_text(
+                                f"@{canonical_dec[:-1]}", tool_definition_category, dec_frameworks,
+                            )
+                    if dec_fw is not None:
+                        confirmed_tool_definitions.append({
+                            "framework": dec_fw, "name": node.name,
+                            "line": getattr(dec, "lineno", node.lineno),
+                            "matched_call": dec_text,
+                        })
+            if tool_definition_category is not None and isinstance(node, ast.ClassDef):
+                # `class X(BaseTool): name = "x"` -- base confirmed by import.
+                tool_name = next((
+                    stmt.value.value for stmt in node.body
+                    if isinstance(stmt, (ast.Assign, ast.AnnAssign))
+                    and any(isinstance(t, ast.Name) and t.id == "name"
+                            for t in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]))
+                    and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)
+                ), None)
+                for base in node.bases if tool_name else []:
+                    base_text = _resolve_expr_text(base)
+                    base_fw = _match_constructor_text(
+                        base_text, tool_definition_category,
+                        _frameworks_for_call_identifier(base, import_aliases),
+                    )
+                    if base_fw is not None:
+                        confirmed_tool_definitions.append({
+                            "framework": base_fw, "name": tool_name,
+                            "line": node.lineno, "matched_call": base_text,
+                        })
+                        break
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             lines.append(node.value)
         elif isinstance(node, ast.Assign):
             var_name = _extract_simple_target_name(node.targets)
+            if var_name is not None:
+                if isinstance(node.value, ast.Call):
+                    assign_target_for_call[id(node.value)] = var_name
+                assigns_by_func_and_name[(func_ctx, var_name)] = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            # `x: T = expr` -- same as a plain Assign, just a single
+            # `.target` instead of a `.targets` list.
+            var_name = _resolve_identity(node.target)
             if var_name is not None:
                 if isinstance(node.value, ast.Call):
                     assign_target_for_call[id(node.value)] = var_name
@@ -1016,11 +2483,24 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     named_agents = []
     agent_var_by_call_id = {}
     agent_framework_by_var = {}  # populated below, used by call_sites/write/read attribution
+    # Preliminary view (before wrap-filtering) so a wrapping call can look
+    # up which framework its receiver already resolved to.
+    prelim_agent_framework = {
+        assign_target_for_call[cid]: e["framework"]
+        for cid, e in pending_agent_calls.items() if assign_target_for_call.get(cid)
+    }
     for call_id, entry in pending_agent_calls.items():
         var_name = assign_target_for_call.get(call_id)
         if entry["name"] is None:
             entry["name"] = var_name
         agent_var_by_call_id[call_id] = var_name
+        wrapped_framework = _wrapping_call_framework(entry["call_node"], var_name, prelim_agent_framework)
+        if wrapped_framework is not None:
+            if var_name:
+                agent_framework_by_var[var_name] = wrapped_framework
+            continue  # same agent as the receiver -- don't count a second one
+        if var_name:
+            agent_framework_by_var[var_name] = entry["framework"]
         named_agents.append({
             "name": entry["name"], "framework": entry["framework"],
             "line": entry["line"], "tools_bound": entry["tools_bound"],
@@ -1034,27 +2514,40 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # Confirmed by testing.
             "variable": var_name,
         })
-    agent_framework_by_var.update({
-        var_name: entry["framework"]
-        for call_id, entry in pending_agent_calls.items()
-        for var_name in [agent_var_by_call_id[call_id]] if var_name
-    })
 
     named_stores = []
     store_var_by_call_id = {}
-    for call_id, entry in pending_store_calls.items():
-        var_name = assign_target_for_call.get(call_id)
-        store_var_by_call_id[call_id] = var_name
-        named_stores.append({
-            "variable": var_name, "framework": entry["framework"], "line": entry["line"],
-            "matched_call": entry["matched_call"],
-        })
-    known_store_vars = {s["variable"] for s in named_stores if s["variable"]}
     # variable -> single resolved framework, used to deduplicate write/read
     # counting below (was previously counted independently per framework
     # whenever a shared verb like ".add(" matched, regardless of which
     # actual store the call was on).
-    store_framework_by_var = {s["variable"]: s["framework"] for s in named_stores if s["variable"]}
+    store_framework_by_var = {}
+    prelim_store_framework = {
+        assign_target_for_call[cid]: e["framework"]
+        for cid, e in pending_store_calls.items() if assign_target_for_call.get(cid)
+    }
+    for call_id, entry in pending_store_calls.items():
+        var_name = assign_target_for_call.get(call_id)
+        store_var_by_call_id[call_id] = var_name
+        wrapped_framework = _wrapping_call_framework(entry["call_node"], var_name, prelim_store_framework)
+        if wrapped_framework is not None:
+            if var_name:
+                store_framework_by_var[var_name] = wrapped_framework
+            continue  # same store as the receiver -- don't count a second one
+        if var_name:
+            store_framework_by_var[var_name] = entry["framework"]
+        named_stores.append({
+            "variable": var_name, "framework": entry["framework"], "line": entry["line"],
+            "matched_call": entry["matched_call"],
+        })
+
+    for call_id, entry in pending_tool_def_calls.items():
+        confirmed_tool_definitions.append({
+            "framework": entry["framework"],
+            "name": assign_target_for_call.get(call_id),
+            "line": entry["line"],
+            "matched_call": entry["matched_call"],
+        })
 
     # CROSS-FILE resolution: a store OR agent created in another file and
     # imported here (`from store import kb`, `from agents import researcher`)
@@ -1084,6 +2577,10 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     ident = _resolve_identity(t)
                     if ident:
                         locally_reassigned.add(ident)
+            elif isinstance(node, ast.AnnAssign):
+                ident = _resolve_identity(node.target)
+                if ident:
+                    locally_reassigned.add(ident)
 
         for kind, table in (("stores", store_framework_by_var), ("agents", agent_framework_by_var)):
             exports_for_kind = external_exports.get(kind) or {}
@@ -1192,18 +2689,47 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     for node, func_ctx in _walk_with_function_context(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        if node.func.attr not in LLM_TOOL_CALL_METHODS:
+        if node.func.attr in ("bind_tools", "bindTools"):
+            # AST-based counterpart to _detect_bind_tools_calls' line regex
+            # (JS/TS only) -- can actually look at the call's arguments.
+            try:
+                matched_call = f"{ast.unparse(node.func)}("
+            except Exception:
+                matched_call = f".{node.func.attr}("
+            llm_tool_calls.append({
+                "line": node.lineno, "variable": _resolve_identity(node.func), "framework": "LangChain",
+                "matched_call": matched_call, "tool_names": _extract_bind_tools_names(node),
+            })
             continue
         base_var = _resolve_identity(node.func)
         framework = llm_client_framework_by_var.get(base_var)
         if framework is None:
             continue
+        request_path = _resolve_expr_text(node.func)[len(base_var) + 1:]
+        if framework == "Mistral SDK":
+            if request_path not in {"chat.complete", "chat.complete_async", "chat.stream", "chat.stream_async"}:
+                continue
+        elif framework.startswith("Custom ("):
+            # An API key alone is not proof of an LLM client. Require a
+            # recognizable request namespace as corroborating evidence.
+            if request_path not in {"chat.completions.create", "messages.create", "messages.stream",
+                                    "responses.create", "chat.complete", "chat.complete_async"}:
+                continue
+        elif node.func.attr not in LLM_TOOL_CALL_METHODS:
+            continue
         tools_kwarg = next((kw.value for kw in node.keywords if kw.arg == "tools"), None)
+        if tools_kwarg is None:
+            tools_kwarg = _find_starred_tools_value(node, assigns_by_func_and_name, func_ctx)
         if tools_kwarg is None:
             continue
         tool_names = _extract_literal_tool_names(tools_kwarg)
+        try:
+            matched_call = f"{ast.unparse(node.func)}("  # e.g. "self.client.chat.completions.create(" -- the actual evidence primitive
+        except Exception:
+            matched_call = f".{node.func.attr}("
         llm_tool_calls.append({
             "line": node.lineno, "variable": base_var, "framework": framework,
+            "matched_call": matched_call,
             "tool_names": tool_names,  # None means confirmed-but-not-extractable, see docstring above
         })
 
@@ -1256,8 +2782,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     all_imports = []
     has_tracked_framework = False
     for local_name, canonical in sorted(import_aliases.items()):
-        module_root = canonical.split(".")[0]
-        framework = MODULE_TO_FRAMEWORK.get(module_root)
+        framework = _resolve_module_framework(canonical)
         if framework:
             has_tracked_framework = True
         all_imports.append({
@@ -1270,7 +2795,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
 
     return ("\n".join(lines), None, named_agents, named_stores,
             store_agent_links, tainted_writes, write_sites, read_sites, call_sites, imports,
-            llm_tool_calls, tool_use_markers, agent_markers)
+            llm_tool_calls, tool_use_markers, agent_markers, confirmed_tool_definitions)
 
 
 def _reduce_javascript(source):

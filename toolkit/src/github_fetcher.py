@@ -138,7 +138,15 @@ class GitHubClient:
     def _get(self, url, timeout=30, max_retries=3):
         resp = None
         for attempt in range(max_retries):
-            resp = self.session.get(url, timeout=timeout)
+            try:
+                resp = self.session.get(url, timeout=timeout)
+            except requests.exceptions.RequestException:
+                # Retry transient network failures without aborting the scan.
+                resp = None
+                if attempt == max_retries - 1:
+                    return None
+                time.sleep(2 ** attempt * 5)
+                continue
             if resp.status_code == 200:
                 return resp
             if resp.status_code in (403, 429):

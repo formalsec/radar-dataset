@@ -28,6 +28,7 @@ import argparse
 import gc
 import io
 import os
+import re
 import sys
 import tarfile
 import time
@@ -45,9 +46,16 @@ _DEFAULT_RESULTS_DIR = _PACKAGE_DIR.parent / "output" / "scan_results"
 EXCLUDED_DIR_NAMES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
     "dist", "build", ".next", ".turbo", "site-packages", ".mypy_cache",
-    ".pytest_cache", "coverage", ".tox", "vendor",
+    ".pytest_cache", "coverage", ".tox", "vendor", "test", "tests", "evals",
+    "examples", "example", "demo", "demos", "tutorial", "tutorials",
+    "showcase", "cookbook",
 }
 RELEVANT_EXTENSIONS = set(EXTENSION_LANGUAGE_MAP.keys())
+
+# Test files colocated next to source (not inside test/tests dirs) -- confirmed a major over-count source, e.g. getpaseo/paseo's agent-manager.test.ts alone contributed 180 of its 609 detected "agents".
+EXCLUDED_FILENAME_RE = re.compile(
+    r"\.(?:test|spec)\.[jt]sx?$|(?:^|/)test_[^/]+\.py$|_test\.py$", re.IGNORECASE
+)
 
 
 def fetch_tarball_bytes(client, owner, repo, ref="HEAD"):
@@ -74,6 +82,8 @@ def iter_tarball_source_files(tar_bytes):
             if not rel:
                 continue
             if any(part in EXCLUDED_DIR_NAMES for part in rel.split("/")):
+                continue
+            if EXCLUDED_FILENAME_RE.search(rel):
                 continue
 
             suffix = Path(rel).suffix.lower()
@@ -112,28 +122,48 @@ def scan_tarball(detector, tar_bytes):
     """
     total_files = 0
     files_scanned = 0
+    files_with_parse_errors = 0
     findings = []
     agent_instances = []   # kept internally for radar_summary math (not returned raw)
+    custom_agent_instances = []
     store_instances = []
     store_agent_links = []
     write_sites = []
     read_sites = []
 
+    # Supply local JS/TS modules for tools passed through imported factories.
+    javascript_sources = {
+        rel: text for rel, text, size, relevant in iter_tarball_source_files(tar_bytes)
+        if relevant and text is not None and size <= detector.max_file_size_bytes
+        and EXTENSION_LANGUAGE_MAP.get(Path(rel).suffix.lower()) == "javascript"
+    }
     for rel, text, size_bytes, is_relevant in iter_tarball_source_files(tar_bytes):
         total_files += 1
         if not is_relevant or text is None:
             continue
 
-        result = detector.analyze_source(text, rel, size_bytes=size_bytes)
+        result = detector.analyze_source(text, rel, size_bytes=size_bytes,
+                                         javascript_sources=javascript_sources)
         if result.skipped_reason:
             continue
         files_scanned += 1
+        # `files_scanned` already counted this file above -- a parse error
+        # (e.g. unresolved git-conflict markers, see test_counts.py) does
+        # NOT skip a file, it just leaves it with empty findings, so
+        # "scanned" alone doesn't tell you whether a file's contents were
+        # actually analyzed. Surfaced separately rather than folded into
+        # skipped_reason, so files_scanned keeps its existing meaning for
+        # any code/report already relying on it.
+        if result.parse_error:
+            files_with_parse_errors += 1
 
         for f in result.findings:
             findings.append({**f, "file": rel})
 
         for a in result.named_agents:
             agent_instances.append({"name": a["name"], "tools_bound": a["tools_bound"]})
+        for c in result.custom_agents:
+            custom_agent_instances.append(c)
         for s in result.named_stores:
             store_instances.append({"variable": s["variable"]})
         for link in result.store_agent_links:
@@ -145,11 +175,54 @@ def scan_tarball(detector, tar_bytes):
 
     findings.sort(key=lambda f: (f["file"], f["line"]))
 
-    unique_agent_names = sorted({a["name"] for a in agent_instances if a["name"]})
-    n_agents = len(unique_agent_names) or sum(1 for a in agent_instances if not a["name"])
+    # Evidence for both agent counts below.
+    agent_evidence = [
+        {"name": f["name"], "framework": f["framework"], "matched": f["matched"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content")}
+        for f in findings if f["type"] == "agent"
+    ]
+    custom_agent_evidence = [
+        {"name": f["name"], "framework": f["framework"], "matched": f["matched"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "tool_names": f.get("tool_names")}
+        for f in findings if f["type"] == "custom_agent"
+    ]
+    tools_evidence = [
+        {"name": tool_name, "agent": f["name"], "framework": f["framework"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "source": "agent_tools_kwarg"}
+        for f in findings if f["type"] == "agent"
+        for tool_name in (f.get("tools_bound") or [])
+    ] + [
+        {"name": tool_name, "agent": f["name"], "framework": f["framework"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "source": "model_tool_binding"}
+        for f in findings if f["type"] == "custom_agent"
+        for tool_name in (f.get("tool_names") or [])
+    ] + [
+        {"name": f["name"], "agent": None, "framework": f["framework"],
+         "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+         "source": "confirmed_tool_definition"}
+        for f in findings if f["type"] == "confirmed_tool_definition" and f.get("name")
+    ]
+    tool_definition_evidence = [
+        {"file": f["file"], "line": f["line"], "matched": f["matched"],
+         "line_content": f.get("line_content")}
+        for f in findings if f["type"] == "tool_definition"
+    ]
+
+    # n_agents counts every confirmed agent-creation call site, not unique
+    # names -- deduping by name repo-wide was collapsing distinct agents in
+    # different files that happen to share a common local variable name.
+    n_agents = len(agent_instances)
     tools_bound_all = set()
     for a in agent_instances:
         tools_bound_all.update(a.get("tools_bound", []))
+    for c in custom_agent_instances:
+        tools_bound_all.update(c.get("tool_names") or [])
+    tools_bound_all.update(
+        ev["name"] for ev in tools_evidence if ev["source"] == "confirmed_tool_definition"
+    )
     n_tools = len(tools_bound_all)
     has_rag = len(store_instances) > 0
 
@@ -168,10 +241,31 @@ def scan_tarball(detector, tar_bytes):
     })
     unsanitized_writes = any(w["unsanitized"] for w in write_sites)
 
+    # n_custom_agents: hand-rolled agents (no tracked framework) confirmed
+    # only via real tool-calling evidence. NOT guaranteed disjoint from
+    # n_agents: a file can have a framework-confirmed agent (e.g. a
+    # LangGraph StateGraph) AND separately bind tools to a model via
+    # `.bind_tools(` for one of that graph's nodes -- the same construction
+    # step, not a second agent. n_agents + n_custom_agents is a ceiling on
+    # a repo's agent count, not a verified total.
+    custom_agent_llm_tool_names = sorted({
+        name for c in custom_agent_instances for name in (c.get("tool_names") or [])
+    })
+
     radar_summary = {
         "n_agents": n_agents,
-        "agent_names": unique_agent_names,
+        "agent_evidence": agent_evidence,
+        "n_custom_agents": len(custom_agent_instances),
+        "custom_agent_evidence": custom_agent_evidence,
+        "has_confirmed_llm_tool_calling": len(custom_agent_instances) > 0,
+        "llm_tool_names": custom_agent_llm_tool_names,
         "n_tools": n_tools,
+        "tools_evidence": tools_evidence,
+        "n_confirmed_tool_definitions": sum(
+            1 for ev in tools_evidence if ev["source"] == "confirmed_tool_definition"
+        ),
+        "n_tool_definition_markers": len(tool_definition_evidence),
+        "tool_definition_evidence": tool_definition_evidence,
         "has_rag": has_rag,
         "shared_across_agents": shared_across_agents,
         "rag_writers": rag_writers,
@@ -189,6 +283,7 @@ def scan_tarball(detector, tar_bytes):
     return {
         "total_files": total_files,
         "files_scanned": files_scanned,
+        "files_with_parse_errors": files_with_parse_errors,
         "radar_summary": radar_summary,
         "findings": findings,
         "_detected_frameworks": sorted(detected_frameworks),  # consumed by build_output_record, not meant as final output

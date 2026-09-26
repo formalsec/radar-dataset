@@ -17,7 +17,6 @@
         "AutoGen": [
           "AssistantAgent(",
           "ConversableAgent(",
-          "GroupChat(",
           "UserProxyAgent("
         ],
         "Bee Agent Framework": [
@@ -32,6 +31,20 @@
           "new ReActAgent(",
           "new RequirementAgent("
         ],
+        "Browser-use": [
+          "Agent(",
+          "from browser_use import Agent"
+        ],
+        "CAMEL": [
+          "ChatAgent("
+        ],
+        "Claude Agent SDK": [
+          "@anthropic-ai/claude-agent-sdk",
+          "@anthropic-ai/claude-code",
+          "ClaudeSDKClient(",
+          "from claude_agent_sdk import query, ClaudeSDKClient",
+          "query("
+        ],
         "CopilotKit": [
           "<CopilotKit",
           "@copilotkit/react-core",
@@ -41,21 +54,28 @@
           "@agent",
           "@crew",
           "Agent(",
-          "Crew(",
           "Process.hierarchical",
           "Process.sequential"
         ],
-        "Deep Agents JS": [
-          "@langchain/deep-agents",
-          "DeepAgent",
-          "DeepAgentConfig",
-          "deepAgents("
+        "Deep Agents": [
+          "\\bCreateDeepAgentParams\\b",
+          "\\bDeepAgent\\b",
+          "createDeepAgent(",
+          "create_deep_agent(",
+          "from \"deepagents\"",
+          "from 'deepagents'",
+          "from deepagents import create_deep_agent"
         ],
         "ElizaOS": [
           "@elizaos/core",
           "ElizaAgent(",
           "createEliza(",
           "new AgentRuntime("
+        ],
+        "Google ADK": [
+          "Agent(",
+          "LlmAgent(",
+          "from google.adk"
         ],
         "Haystack": [
           "Agent(",
@@ -67,21 +87,23 @@
           "createOpenAIToolsAgent(",
           "createReactAgent(",
           "createToolCallingAgent(",
+          "create_agent(",
           "create_json_agent(",
           "create_openai_tools_agent(",
+          "create_pandas_dataframe_agent(",
           "create_react_agent(",
+          "create_sql_agent(",
           "create_structured_chat_agent(",
           "create_tool_calling_agent(",
           "from langchain.agents import AgentExecutor",
+          "initialize_agent(",
           "new AgentExecutor("
         ],
         "LangGraph": [
           ".addNode(",
           ".add_node(",
           ".compile(",
-          "MemorySaver(",
           "MessageGraph(",
-          "SqliteSaver(",
           "StateGraph(",
           "create_react_agent(",
           "new StateGraph("
@@ -98,21 +120,35 @@
         ],
         "MCP SDK": [
           "@modelcontextprotocol/sdk",
-          "MCP",
-          "Server(",
-          "new McpServer("
+          "new McpServer(",
+          "new Server("
         ],
         "Mastra": [
           "@mastra/core",
           "MastraAgent",
           "createAgent(",
-          "new Agent<",
+          "new Agent(",
+          "new Agent<[^>]*>\\s*\\(",
           "new Mastra("
         ],
         "OpenAI Agents SDK": [
+          "Agent(",
           "from agents import Agent",
           "from openai import Agent",
           "openai.agents"
+        ],
+        "Pi": [
+          "@earendil-works/pi-agent-core",
+          "@earendil-works/pi-coding-agent",
+          "@mariozechner/pi-agent-core",
+          "@mariozechner/pi-coding-agent",
+          "agentLoop(",
+          "agentLoopContinue(",
+          "createAgentSession(",
+          "createAgentSessionFromServices(",
+          "createAgentSessionRuntime(",
+          "runAgentLoop(",
+          "runAgentLoopContinue("
         ],
         "Pydantic AI": [
           "@agent.tool",
@@ -136,6 +172,79 @@
         "Graph Compile": [
           "\\.compile\\s*\\("
         ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "AutoGen": [
+          "python"
+        ],
+        "Bee Agent Framework": [
+          "javascript",
+          "python"
+        ],
+        "Browser-use": [
+          "python"
+        ],
+        "CAMEL": [
+          "python"
+        ],
+        "Claude Agent SDK": [
+          "javascript",
+          "python"
+        ],
+        "CopilotKit": [
+          "javascript"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Deep Agents": [
+          "javascript",
+          "python"
+        ],
+        "ElizaOS": [
+          "javascript"
+        ],
+        "Google ADK": [
+          "python"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LangGraph": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "MCP SDK": [
+          "javascript"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Pi": [
+          "javascript"
+        ],
+        "Pydantic AI": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
+        ],
+        "Vercel AI SDK": [
+          "javascript"
+        ]
       }
     },
     "agent_calls": {
@@ -155,7 +264,7 @@
         "CrewAI": [
           ".kickoff("
         ],
-        "Deep Agents JS": [
+        "Deep Agents": [
           ".invoke(",
           ".stream("
         ],
@@ -238,6 +347,56 @@
           "POST /api/agents/[^/]+/invoke",
           "X-Agent-ID"
         ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "AutoGen": [
+          "python"
+        ],
+        "Bee Agent Framework": [
+          "javascript",
+          "python"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Deep Agents": [
+          "javascript"
+        ],
+        "ElizaOS": [
+          "javascript"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LangGraph": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Pydantic AI": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
+        ],
+        "Vercel AI SDK": [
+          "javascript"
+        ]
       }
     },
     "rag_creation": {
@@ -309,6 +468,39 @@
         ],
         "Zep JS": [
           "new ZepClient("
+        ]
+      },
+      "framework_languages": {
+        "Chroma": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mem0": [
+          "python"
+        ],
+        "Milvus": [
+          "python"
+        ],
+        "PGVector": [
+          "python"
+        ],
+        "Pinecone": [
+          "javascript",
+          "python"
+        ],
+        "Qdrant": [
+          "javascript",
+          "python"
+        ],
+        "Weaviate": [
+          "javascript",
+          "python"
+        ],
+        "Zep": [
+          "python"
         ]
       }
     },
@@ -407,6 +599,49 @@
           "POST /api/memories/",
           "X-Agent-ID"
         ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "Chroma": [
+          "javascript",
+          "python"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mem0": [
+          "python"
+        ],
+        "Milvus": [
+          "python"
+        ],
+        "PGVector": [
+          "python"
+        ],
+        "Pinecone": [
+          "javascript",
+          "python"
+        ],
+        "Qdrant": [
+          "javascript",
+          "python"
+        ],
+        "Weaviate": [
+          "javascript",
+          "python"
+        ],
+        "Zep": [
+          "python"
+        ]
       }
     },
     "rag_reads": {
@@ -429,8 +664,7 @@
           "vector_store.similarity_search("
         ],
         "Haystack": [
-          ".run(",
-          "Retriever("
+          ".run("
         ],
         "LangChain": [
           ".asRetriever(",
@@ -508,6 +742,49 @@
           "POST /api/search",
           "X-Agent-ID"
         ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "Chroma": [
+          "javascript",
+          "python"
+        ],
+        "Haystack": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mem0": [
+          "python"
+        ],
+        "Milvus": [
+          "python"
+        ],
+        "PGVector": [
+          "python"
+        ],
+        "Pinecone": [
+          "javascript",
+          "python"
+        ],
+        "Qdrant": [
+          "javascript",
+          "python"
+        ],
+        "Weaviate": [
+          "javascript",
+          "python"
+        ],
+        "Zep": [
+          "python"
+        ]
       }
     },
     "a2a_interaction": {
@@ -537,7 +814,7 @@
           "manager_agent=",
           "manager_llm="
         ],
-        "Deep Agents JS": [
+        "Deep Agents": [
           "@langchain/langgraph"
         ],
         "ElizaOS": [
@@ -591,6 +868,145 @@
         ],
         "Tool Agent Invoke": [
           "tool\\.invoke_agent"
+        ]
+      },
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "AutoGen": [
+          "python"
+        ],
+        "Bee Agent Framework": [
+          "python"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Deep Agents": [
+          "javascript"
+        ],
+        "ElizaOS": [
+          "javascript"
+        ],
+        "LangGraph": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
+        ]
+      }
+    },
+    "tool_definition": {
+      "frameworks": {
+        "Agno": [
+          "@tool"
+        ],
+        "Browser-use": [
+          "@controller.action",
+          "from browser_use import Controller"
+        ],
+        "CopilotKit": [
+          "useCopilotAction("
+        ],
+        "CrewAI": [
+          "@tool",
+          "BaseTool",
+          "from crewai.tools import tool",
+          "from crewai_tools import tool"
+        ],
+        "Google ADK": [
+          "FunctionTool(",
+          "from google.adk.tools import FunctionTool"
+        ],
+        "LangChain": [
+          "@tool",
+          "BaseTool",
+          "StructuredTool.from_function(",
+          "from langchain.tools import tool",
+          "from langchain_core.tools import tool",
+          "new DynamicStructuredTool(",
+          "new DynamicTool("
+        ],
+        "LlamaIndex": [
+          "FunctionTool.from_defaults(",
+          "QueryEngineTool(",
+          "from llama_index.core.tools import FunctionTool"
+        ],
+        "MCP SDK": [
+          "@mcp.tool",
+          "from mcp.server.fastmcp import FastMCP",
+          "server.setRequestHandler(CallToolRequestSchema",
+          "server.setRequestHandler(ListToolsRequestSchema",
+          "server.tool("
+        ],
+        "Mastra": [
+          "createTool(",
+          "from '@mastra/core/tools'"
+        ],
+        "OpenAI Agents SDK": [
+          "@function_tool",
+          "FunctionTool(",
+          "from agents import function_tool"
+        ],
+        "Pydantic AI": [
+          "@agent.tool",
+          "@agent.tool_plain"
+        ],
+        "Smolagents": [
+          "@tool",
+          "from smolagents import tool"
+        ]
+      },
+      "generic": {},
+      "framework_languages": {
+        "Agno": [
+          "python"
+        ],
+        "Browser-use": [
+          "python"
+        ],
+        "CopilotKit": [
+          "javascript"
+        ],
+        "CrewAI": [
+          "python"
+        ],
+        "Google ADK": [
+          "python"
+        ],
+        "LangChain": [
+          "javascript",
+          "python"
+        ],
+        "LlamaIndex": [
+          "python"
+        ],
+        "MCP SDK": [
+          "javascript",
+          "python"
+        ],
+        "Mastra": [
+          "javascript"
+        ],
+        "OpenAI Agents SDK": [
+          "python"
+        ],
+        "Pydantic AI": [
+          "python"
+        ],
+        "Smolagents": [
+          "python"
         ]
       }
     }

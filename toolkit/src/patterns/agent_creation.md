@@ -1,9 +1,7 @@
 # Agent Creation Patterns
 
-Scope: restricted to frameworks listed in Table II of the RADAR paper (39 frameworks
-across Orchestration, LLM SDKs, Memory & RAG, Tool Use, Protocols). Frameworks not in
-Table II (e.g. Microsoft Agent Framework, Genkit, FlowiseAI, Husk, Veryfront) have been
-removed from this file — add them to Table II first if they should be tracked.
+Scope: Table II frameworks plus CAMEL, Claude Agent SDK and Pi. Counts include
+bundled-library creation sites.
 
 ## Detection Methods
 
@@ -21,16 +19,21 @@ removed from this file — add them to Table II first if they should be tracked.
 | Framework | Detection Patterns |
 |-----------|-------------------|
 | **Agno** | `from agno.agent import Agent`<br>`agno\.Agent`<br>`Agent(`<br>`Team(`<br>`Workflow(`<br>`@agent`<br>`@crew`<br>`@tool`<br>`.run(`<br>`.arun(` |
-| **LangChain** | `create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
-| **LangGraph** | `StateGraph(`<br>`MessageGraph(`<br>`.add_node(`<br>`.compile(`<br>`create_react_agent(`<br>`MemorySaver(`<br>`SqliteSaver(` |
-| **CrewAI** | `Agent(`<br>`Crew(`<br>`@agent`<br>`@crew`<br>`Process.sequential`<br>`Process.hierarchical` |
-| **AutoGen** | `ConversableAgent(`<br>`AssistantAgent(`<br>`UserProxyAgent(`<br>`GroupChat(` |
+| **Browser-use** | `Agent(` *(confirmed via `from browser_use import Agent`, same import-confirmation mechanism as every other bare "Agent(" row)* |
+| **CAMEL** | `ChatAgent(` *(import-confirmed)* |
+| **Claude Agent SDK** | `query(`<br>`ClaudeSDKClient(` *(import-confirmed via `from claude_agent_sdk import query, ClaudeSDKClient` or the legacy claude_code_sdk package; bare `query(` is far too common to count unconfirmed)* |
+| **LangChain** | `create_agent(`<br>`create_react_agent(`<br>`create_json_agent(`<br>`create_openai_tools_agent(`<br>`create_tool_calling_agent(`<br>`create_structured_chat_agent(`<br>`create_pandas_dataframe_agent(`<br>`create_sql_agent(`<br>`initialize_agent(`<br>`AgentExecutor(`<br>`from langchain.agents import AgentExecutor` |
+| **LangGraph** | `StateGraph(`<br>`MessageGraph(`<br>`.add_node(`<br>`.compile(`<br>`create_react_agent(` |
+| **CrewAI** | `Agent(`<br>`@agent`<br>`@crew`<br>`Process.sequential`<br>`Process.hierarchical` |
+| **AutoGen** | `ConversableAgent(`<br>`AssistantAgent(`<br>`UserProxyAgent(` |
 | **LlamaIndex** | `ReActAgent(`<br>`OpenAIAgent(`<br>`FunctionCallingAgentWorker(`<br>`AgentRunner(`<br>`Workflow(`<br>`@step`<br>`StartEvent`<br>`StopEvent` |
 | **Pydantic AI** | `pydantic_ai.Agent`<br>`from pydantic_ai import Agent`<br>`@agent.tool`<br>`@agent.tool_plain` |
 | **Smolagents** | `ToolCallingAgent(`<br>`CodeAgent(`<br>`ManagedAgent(` |
 | **Haystack** | `from haystack import Agent`<br>`Agent(`<br>`Pipeline(` |
-| **OpenAI Agents SDK** | `from openai import Agent`<br>`from agents import Agent`<br>`openai.agents` |
+| **OpenAI Agents SDK** | `Agent(`<br>`from openai import Agent`<br>`from agents import Agent`<br>`openai.agents` |
 | **Bee Agent Framework** | `from beeai_framework.agents.react import ReActAgent`<br>`from beeai_framework.agents.requirement import RequirementAgent`<br>`ReActAgent(`<br>`RequirementAgent(`<br>*(package was renamed from `bee_agent_framework` to `beeai_framework`; match both import roots)* |
+| **Deep Agents** | `create_deep_agent(`<br>`from deepagents import create_deep_agent` *(the Python deepagents package -- same framework as JS's "Deep Agents JS" row below, canonicalized to one name via pattern_index.py's ALIASES, same as LangChain/LangChain.js)* |
+| **Google ADK** | `Agent(`<br>`LlmAgent(`<br>`from google.adk` *(Google's Agent Development Kit -- resolved via a google.adk submodule override in pattern_detector.py, so it's never misread as Google GenAI just because both import under plain google)* |
 
 ---
 
@@ -40,13 +43,15 @@ removed from this file — add them to Table II first if they should be tracked.
 |-----------|-------------------|
 | **LangChain.js** | `createReactAgent(`<br>`createOpenAIToolsAgent(`<br>`createToolCallingAgent(`<br>`new AgentExecutor(` |
 | **LangGraph.js** | `new StateGraph(`<br>`.addNode(`<br>`.compile(` |
-| **Mastra** | `new Mastra(`<br>`createAgent(`<br>`@mastra/core`<br>`new Agent<`<br>`MastraAgent` |
+| **Mastra** | `new Mastra(`<br>`createAgent(`<br>`@mastra/core`<br>`new Agent(`<br>`new Agent<[^>]*>\s*\(`<br>`MastraAgent` |
 | **Vercel AI SDK** | `generateText(`<br>`streamText(`<br>`from 'ai'`<br>`from '@ai-sdk/` |
 | **ElizaOS** | `createEliza(`<br>`ElizaAgent(`<br>`new AgentRuntime(`<br>`@elizaos/core` |
-| **Deep Agents JS** | `deepAgents(`<br>`@langchain/deep-agents`<br>`DeepAgent`<br>`DeepAgentConfig` |
+| **Deep Agents JS** | `createDeepAgent(`<br>`from "deepagents"`<br>`from 'deepagents'`<br>`\bDeepAgent\b`<br>`\bCreateDeepAgentParams\b` |
 | **Bee Agent Framework** | `new ReActAgent(`<br>`new RequirementAgent(`<br>`@i-am-bee/beeai-framework`<br>`from 'beeai-framework'` |
 | **CopilotKit** | `useCopilotAction(`<br>`<CopilotKit`<br>`@copilotkit/react-core` |
-| **MCP SDK** | `new McpServer(`<br>`@modelcontextprotocol/sdk`<br>`Server(` from the MCP SDK namespace *(disambiguate from bare `MCP` — see Protocols note below)* |
+| **Claude Agent SDK** | `query(` *(calls must resolve to a named or namespace binding from `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code`; aliases and direct require/dynamic import bindings are supported)* |
+| **Pi** | `createAgentSession(`<br>`createAgentSessionFromServices(`<br>`createAgentSessionRuntime(`<br>`agentLoop(`<br>`agentLoopContinue(`<br>`runAgentLoop(`<br>`runAgentLoopContinue(` *(calls must resolve to a named or namespace binding from `@earendil-works/pi-coding-agent`, `@mariozechner/pi-coding-agent`, `@earendil-works/pi-agent-core` or `@mariozechner/pi-agent-core`; aliases and direct require/dynamic import bindings are supported)* |
+| **MCP SDK** | `new McpServer(`<br>`new Server(`<br>`@modelcontextprotocol/sdk` *(bare Server( is excluded — it's a substring of any unrelated createServer(/fooServer( call, confirmed a real false-positive source by testing; a bare "MCP" substring is excluded for the same reason — see Protocols note below)* |
 
 ---
 
@@ -111,14 +116,53 @@ from smolagents import ToolCallingAgent, CodeAgent, ManagedAgent
 # Bee Agent Framework
 from beeai_framework.agents.react import ReActAgent
 from beeai_framework.agents.requirement import RequirementAgent
+
+# Deep Agents
+from deepagents import create_deep_agent
+
+# Google ADK
+from google.adk.agents import Agent, LlmAgent
+
+# Claude Agent SDK
+from claude_agent_sdk import query, ClaudeSDKClient
 ```
 
 ### Notes on scope
 - **MCP SDK** appears here only when it is used to *construct* an agent-serving process
-  (`McpServer(`, `Server(`); a bare `MCP` or `mcptool` token is too generic for creation
+  (`new McpServer(`, `new Server(`); a bare `MCP` or `mcptool` token is too generic for creation
   detection and belongs instead under the Protocols-specific handoff/call signals, gated
-  by confirmation logic (see Agent Handoffs doc).
+  by confirmation logic (see Agent Handoffs doc). It's tracked here for
+  `framework_comparison`, but excluded from `n_agents` in pattern_detector.py --
+  it creates a tool-exposing server, not an LLM agent.
 - LLM SDKs without an "Agent" abstraction (OpenAI SDK, Anthropic SDK, Google GenAI,
   Together SDK, Instructor, js-agent) are intentionally excluded from this file — they
   provide model calls, not agent constructors. Their usage is picked up separately by
   the LLM-SDK detector, not here.
+- `.bind_tools(`/`.bindTools(` (LangChain's own API for handing tools to a model) is
+  also excluded here, for the opposite reason: called directly in a repo's own code
+  (rather than inside one of the LangChain constructors above), it's evidence of a
+  *custom*, hand-rolled agent, not "using the LangChain framework" — LangChain's own
+  agent constructors call it internally, hidden inside the library, so seeing it in
+  app code means that constructor was skipped. Counted as custom-agent evidence
+  (`n_custom_agents`) in pattern_detector.py, not via this table.
+
+Claude Agent SDK and Pi counts represent confirmed call sites, including Pi
+continuation-loop calls, not distinct agents or runtime invocations. Python
+confirms the `query` and `ClaudeSDKClient` exports from the current or legacy
+Claude SDK; calls on an existing client do not add creation sites.
+
+JS/TS confirmation follows named/namespace imports and direct `require()` or
+awaited `import()` bindings. Re-exports and indirect loaders are not resolved.
+Reassigned or shadowed SDK bindings are conservatively excluded throughout the
+file. JavaScript uses a lightweight token scan, not a full parser; template
+interpolations and more complex binding/control-flow forms can be missed.
+
+## Verification
+
+`patterns_verified.json` is generated from these tables; generation does not
+verify API names. Deep Agents JS references checked on 2026-09-17:
+[creation function](https://reference.langchain.com/javascript/deepagents/browser/createDeepAgent),
+[types](https://reference.langchain.com/javascript/deepagents/types).
+`DeepAgent`, `CreateDeepAgentParams`, and imports indicate usage; only the
+`createDeepAgent(...)` call counts as a creation. `DeepAgentConfig` remains
+unverified. Regression examples are in `pattern_scan/test_counts.py`.

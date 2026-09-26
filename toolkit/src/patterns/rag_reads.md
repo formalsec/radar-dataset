@@ -35,7 +35,7 @@ vector-store/memory constructor in the same scope.
 | **LlamaIndex** | `.as_retriever(`<br>`.retrieve(`<br>`query_engine.query(` |
 | **Mem0** | `.search(`<br>`.get_all(` |
 | **Agno** | `knowledge.search(` |
-| **Haystack** | retriever component `.run(` *(disambiguate from write via preceding `Retriever(` constructor)* |
+| **Haystack** | retriever component `.run(` *(disambiguate from write via preceding "Retriever(" constructor)* |
 
 ---
 
