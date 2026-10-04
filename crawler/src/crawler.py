@@ -45,6 +45,7 @@ class RepoCrawler:
         
         # Storage
         self.storage = StorageManager()
+        self.existing_passed = len(self.storage.get_passed_repos())
         
         # Run tracking
         self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -71,7 +72,7 @@ class RepoCrawler:
         self.all_searched_file = open(self.output_dir / "all_searched.txt", 'w')
         
         print(f"📁 Results will be saved in: {self.output_dir}/")
-        print(f"📊 Target: {target} repos")
+        print(f"📊 Target: {target} total repos ({self.existing_passed} already collected)")
         print(f"🔍 Searching ALL languages at once (filtering to Python/JS/TS)")
 
     def run_group(self, group_name: str, queries: List[str]):
@@ -87,16 +88,21 @@ class RepoCrawler:
         
         # Initial stats
         self._print_stats()
+
+        if self.existing_passed >= self.target:
+            print(f"\n🎯 Target already reached! Have {self.existing_passed}/{self.target} repos")
+            self._finalize()
+            return
         
         # Process each query - ONE call per query (ALL languages)
         for query_idx, query in enumerate(queries, 1):
-            if self.total_passed >= self.target:
-                print(f"\n🎯 Target reached! Found {self.total_passed}/{self.target} repos")
+            if self.existing_passed + self.total_passed >= self.target:
+                print(f"\n🎯 Target reached! Have {self.existing_passed + self.total_passed}/{self.target} repos")
                 break
             
             print(f"\n🔍 ({query_idx}/{len(queries)}): '{query}'")
             print(f"   (Searching ALL languages, filtering for Python/JS/TS)")
-            print(f"   Need {self.target - self.total_passed} more repos")
+            print(f"   Need {self.target - self.existing_passed - self.total_passed} more repos")
             print("-" * 50)
             
             self._search_query(query)
@@ -107,7 +113,7 @@ class RepoCrawler:
     def _search_query(self, query: str):
         """Search a single query - returns ALL languages"""
         for page in range(1, MAX_PAGES_PER_QUERY + 1):
-            if self.total_passed >= self.target:
+            if self.existing_passed + self.total_passed >= self.target:
                 break
             
             # Build URL - NO language prefix
@@ -141,7 +147,7 @@ class RepoCrawler:
             page_failed_fw = 0
             
             for repo in repos:
-                if self.total_passed >= self.target:
+                if self.existing_passed + self.total_passed >= self.target:
                     break
                 
                 # Track repo
@@ -327,10 +333,7 @@ class RepoCrawler:
                 response = self.session.get(url, headers=self.headers, timeout=15)
                 if response.status_code == 200:
                     return response.json()
-                elif response.status_code == 403 and 'rate limit' in response.text.lower():
-                    wait = 60 * (attempt + 1)
-                    print(f"⏳ Rate limit, waiting {wait}s...")
-                    time.sleep(wait)
+                elif response.status_code == 403 and self._wait_for_rate_limit(response, attempt):
                     continue
                 elif response.status_code == 404:
                     return None
@@ -343,17 +346,48 @@ class RepoCrawler:
     def _fetch_file(self, repo: str, file_path: str) -> Optional[str]:
         """Fetch file content"""
         url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+        for attempt in range(3):
+            try:
+                response = self.session.get(url, headers=self.headers, timeout=10)
+                self.api_calls += 1
+                if response.status_code == 200:
+                    data = response.json()
+                    if 'content' in data:
+                        content = base64.b64decode(data['content']).decode('utf-8', errors='ignore')
+                        return content
+                    return None
+                if response.status_code == 403 and self._wait_for_rate_limit(response, attempt):
+                    continue
+                return None
+            except Exception:
+                if attempt < 2:
+                    time.sleep(2)
+        return None
+
+    def _wait_for_rate_limit(self, response: requests.Response, attempt: int) -> bool:
+        """Wait until GitHub's current rate-limit window resets."""
+        is_rate_limited = (
+            response.headers.get('X-RateLimit-Remaining') == '0'
+            or 'rate limit' in response.text.lower()
+        )
+        if not is_rate_limited:
+            return False
+
+        reset_header = response.headers.get('X-RateLimit-Reset')
         try:
-            response = self.session.get(url, headers=self.headers, timeout=10)
-            self.api_calls += 1
-            if response.status_code == 200:
-                data = response.json()
-                if 'content' in data:
-                    content = base64.b64decode(data['content']).decode('utf-8', errors='ignore')
-                    return content
-            return None
-        except:
-            return None
+            reset_time = float(reset_header) if reset_header else 0
+        except (TypeError, ValueError):
+            reset_time = 0
+
+        if reset_time:
+            wait = max(reset_time - time.time(), 0) + 5
+            print(f"⏳ Rate limit, waiting until reset in {wait:.0f}s...")
+        else:
+            wait = 60 * (attempt + 1)
+            print(f"⏳ Rate limit reset unavailable, waiting {wait}s...")
+
+        time.sleep(wait)
+        return True
 
     def _print_stats(self):
         """Print current statistics"""
@@ -362,7 +396,8 @@ class RepoCrawler:
         print(f"   Duplicates skipped: {self.total_duplicates:,}")
         print(f"   Failed language: {self.total_failed_language:,}")
         print(f"   Failed framework: {self.total_failed_framework:,}")
-        print(f"   ✅ PASSED: {self.total_passed:,} (target: {self.target})")
+        print(f"   ✅ PASSED THIS RUN: {self.total_passed:,}")
+        print(f"   ✅ TOTAL PASSED: {self.existing_passed + self.total_passed:,} (target: {self.target})")
         print(f"   API calls: {self.api_calls:,}")
 
     def _save_run_file(self):
@@ -373,6 +408,7 @@ class RepoCrawler:
                 'target': self.target,
                 'total_searched': self.total_searched,
                 'total_passed': self.total_passed,
+                'cumulative_total_passed': self.existing_passed + self.total_passed,
                 'total_failed_language': self.total_failed_language,
                 'total_failed_framework': self.total_failed_framework,
                 'total_duplicates': self.total_duplicates,

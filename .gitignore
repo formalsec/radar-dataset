@@ -22,6 +22,7 @@ ENV/
 
 # Generated crawler outputs
 #crawler/output/
+crawler/output/crawl_results_*
 crawler/seen_repos.json
 crawler/classifications_*.json
 crawler/classifications_*.json.backup*
