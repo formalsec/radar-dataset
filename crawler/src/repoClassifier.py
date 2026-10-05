@@ -283,51 +283,6 @@ class RepoClassifier:
         
         return None
 
-    def parse_classification_from_text(self, text):
-        """Simple parser - looks for JSON first, then keywords"""
-        if not text:
-            return 'needs_review', ''
-        
-        # FIRST: Try to find JSON
-        json_match = re.search(r'\{[^{}]*\}', text)
-        if json_match:
-            try:
-                data = json.loads(json_match.group())
-                classification = data.get('classification', '').lower().strip()
-                if classification in ['app', 'framework', 'needs_review']:
-                    return classification, data.get('reasoning', text[:300])
-            except:
-                pass
-        
-        # SECOND: Look for keywords
-        text_lower = text.lower()
-        
-        # Check for 'needs_review' indicators first
-        if any(word in text_lower for word in ['needs review', 'needs_review', 'unclear', 'ambiguous']):
-            return 'needs_review', text[:300]
-        
-        # Look for 'framework' or 'app'
-        has_framework = 'framework' in text_lower
-        has_app = 'app' in text_lower or 'application' in text_lower
-        
-        # If both are present, check which one comes last (often the conclusion)
-        if has_framework and has_app:
-            last_framework = text_lower.rfind('framework')
-            last_app = max(text_lower.rfind('app'), text_lower.rfind('application'))
-            if last_framework > last_app:
-                return 'framework', text[:300]
-            else:
-                return 'app', text[:300]
-        
-        # Only one is present
-        if has_framework:
-            return 'framework', text[:300]
-        if has_app:
-            return 'app', text[:300]
-        
-        # Neither found
-        return 'needs_review', text[:300]
-    
     def classify_with_ollama(self, readme_content, repo_url, max_retries=3):
         """
         Send README to Ollama for classification with intelligent retry and timeout handling
@@ -362,6 +317,15 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
                         "temperature": 0.2,
                         "stream": False,
                         "keep_alive": -1,  # Keep model loaded between requests
+                        "format": {
+                            "type": "object",
+                            "properties": {
+                                "classification": {"type": "string", "enum": ["app", "framework", "needs_review"]},
+                                "reasoning": {"type": "string"}
+                            },
+                            "required": ["classification", "reasoning"]
+                        },
+                        **({"think": False} if "deepseek-r1" in self.model else {}),
                         "options": {
                             "num_ctx": 2048,
                             "num_predict": 300
@@ -393,9 +357,7 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
                         except:
                             pass
                     
-                    # Fallback: combine with thinking
-                    full_text = response_text + " " + result.get('thinking', '')
-                    classification, reasoning = self.parse_classification_from_text(full_text)
+                    classification, reasoning = 'needs_review', f'UNPARSED: {response_text[:300]}'
                     
                     return {
                         'classification': classification,
