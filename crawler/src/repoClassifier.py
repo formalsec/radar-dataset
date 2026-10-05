@@ -682,10 +682,15 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         return results
     
     def load_urls_from_file(self, file_path):
-        """Load URLs from a text file"""
+        """Load URLs from a text file (one per line) or a JSON file such as dataset/all_repos.json"""
         with open(file_path, 'r') as f:
-            urls = [line.strip() for line in f if line.strip()]
-        return urls
+            if not file_path.endswith('.json'):
+                return [line.strip() for line in f if line.strip()]
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = data.get('urls') or data.get('repos') or []
+        # Entries are URL strings or repo objects with a 'url' field (e.g. all_repos.json)
+        return [u if isinstance(u, str) else u.get('url') for u in data if u]
 
 def main():
     parser = argparse.ArgumentParser(description='Classify GitHub repositories using Ollama')
