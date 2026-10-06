@@ -69,7 +69,7 @@ class RepoClassifier:
         """Helper to truncate content to avoid memory issues"""
         if not content:
             return content
-        max_chars = 3000 if "deepseek" in self.model.lower() else 4000
+        max_chars = 3000
         if len(content) > max_chars:
             content = content[:max_chars] + "\n... [truncated]"
         return content

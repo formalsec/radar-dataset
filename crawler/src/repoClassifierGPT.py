@@ -67,7 +67,7 @@ class URLClassifier:
         
         results['counts'] = self.counts.copy()
     
-    def truncate_content(self, content, max_chars=4000):
+    def truncate_content(self, content, max_chars=3000):
         """Helper to truncate content to avoid token limits"""
         if not content:
             return content
