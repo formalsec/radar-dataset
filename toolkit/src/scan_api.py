@@ -137,8 +137,17 @@ def scan_tarball(detector, tar_bytes):
         if relevant and text is not None and size <= detector.max_file_size_bytes
         and EXTENSION_LANGUAGE_MAP.get(Path(rel).suffix.lower()) == "javascript"
     }
+    seen_skill_files = set()
     for rel, text, size_bytes, is_relevant in iter_tarball_source_files(tar_bytes):
         total_files += 1
+        if (Path(rel).name == "SKILL.md" and rel not in seen_skill_files
+                and size_bytes <= detector.max_file_size_bytes):
+            seen_skill_files.add(rel)
+            findings.append({
+                "type": "skill", "name": Path(rel).parent.name or None,
+                "framework": None, "matched": "SKILL.md", "source": "file",
+                "file": rel, "line": 1,
+            })
         if not is_relevant or text is None:
             continue
 
@@ -251,6 +260,8 @@ def scan_tarball(detector, tar_bytes):
     custom_agent_llm_tool_names = sorted({
         name for c in custom_agent_instances for name in (c.get("tool_names") or [])
     })
+    # One skill per eligible SKILL.md path, including mirrored copies.
+    skill_evidence = [f for f in findings if f['type'] == 'skill']
 
     radar_summary = {
         "n_agents": n_agents,
@@ -261,6 +272,8 @@ def scan_tarball(detector, tar_bytes):
         "llm_tool_names": custom_agent_llm_tool_names,
         "n_tools": n_tools,
         "tools_evidence": tools_evidence,
+        "n_skills": len(skill_evidence),
+        "skill_evidence": skill_evidence,
         "n_confirmed_tool_definitions": sum(
             1 for ev in tools_evidence if ev["source"] == "confirmed_tool_definition"
         ),
