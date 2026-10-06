@@ -103,7 +103,7 @@ python main.py --group <group_name> --target <number> [--token TOKEN]
 | `agent_frameworks` | Broad, generic agent-related terms (e.g. "agent", "autonomous agent") |
 | `specific_frameworks` | Named, well-known agent frameworks (e.g. LangChain, AutoGen, CrewAI) |
 | `multi_agent` | Terms specific to multi-agent systems and orchestration |
-| `comprehensive` | Union of the broad and specific terms above — widest coverage, most overlap/duplicates |
+| `comprehensive` | Union of the broad, specific, and multi-agent terms above |
 
 Run `python main.py --list-groups` to see the exact query strings in each group.
 

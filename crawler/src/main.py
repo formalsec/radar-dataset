@@ -32,7 +32,7 @@ Examples:
     parser.add_argument('--group', required=True, help='Query group to run')
     parser.add_argument('--token', help='GitHub API token (or set GITHUB_TOKEN env var)')
     parser.add_argument('--target', type=int, default=DEFAULT_TARGET_REPOS,
-                       help=f'Number of repos to find (default: {DEFAULT_TARGET_REPOS})')
+                       help=f'Total number of passed repos to reach (default: {DEFAULT_TARGET_REPOS})')
     parser.add_argument('--reset-cache', action='store_true',
                        help='Reset the duplicate cache and start fresh')
     parser.add_argument('--list-groups', action='store_true',
@@ -65,7 +65,7 @@ Examples:
     
     print(f"\n📁 Group: {args.group}")
     print(f"📊 Queries: {len(queries)}")
-    print(f"🎯 Target: {args.target} repos")
+    print(f"🎯 Target: {args.target} total repos")
     
     # Reset cache if requested
     if args.reset_cache:
