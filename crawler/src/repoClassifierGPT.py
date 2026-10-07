@@ -34,6 +34,7 @@ class URLClassifier:
         self.model_name = model
         self.results_file = None
         self.current_results = None
+        self.total_usage = {'input': 0, 'output': 0, 'reasoning': 0}
         self.counts = {
             'app': 0,
             'framework': 0,
@@ -294,7 +295,17 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
             # Send prompt to GPT
             response = self.client.send_prompt(prompt)
             response_text = self.client.response_to_text(response)
-            
+
+            # Show token usage in the terminal (not saved to the results file)
+            u = getattr(response, 'usage', None)
+            if u:
+                reasoning_tokens = getattr(u.output_tokens_details, 'reasoning_tokens', 0) or 0
+                self.total_usage['input'] += u.input_tokens
+                self.total_usage['output'] += u.output_tokens
+                self.total_usage['reasoning'] += reasoning_tokens
+                print(f"   Tokens: {u.input_tokens:,} in / {u.output_tokens:,} out ({reasoning_tokens:,} reasoning)"
+                      f" · session total {self.total_usage['input']:,} in / {self.total_usage['output']:,} out")
+
             # Parse the JSON response
             classification, reasoning = self.parse_classification_from_text(response_text)
             
