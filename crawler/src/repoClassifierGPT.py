@@ -592,6 +592,17 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         print(f"\n✅ COMPLETE! Final results saved to: {output_file}")
         return results
     
+    def load_urls_from_file(self, file_path: str) -> List[str]:
+        """Load URLs from a text file (one per line) or a JSON file such as dataset/all_repos.json"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            if not file_path.endswith('.json'):
+                return [line.strip() for line in f if line.strip()]
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = data.get('urls') or data.get('repos') or []
+        # Entries are URL strings or repo objects with a 'url' field (e.g. all_repos.json)
+        return [u if isinstance(u, str) else u.get('url') for u in data if u]
+
     def process_urls_from_file(self, input_file: str, output_file: str = None, resume: bool = False) -> str:
         """
         Process URLs from a file and save classifications incrementally
@@ -607,9 +618,8 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
         print(f"📖 Reading URLs from: {input_file}")
         
         # Read URLs from file
-        with open(input_file, 'r', encoding='utf-8') as f:
-            urls = [line.strip() for line in f if line.strip()]
-        
+        urls = self.load_urls_from_file(input_file)
+
         print(f"📊 Found {len(urls)} URLs to classify")
         
         # Create output file path if not provided
@@ -724,9 +734,7 @@ def main():
     
     if os.path.exists(args.input):
         print(f"📂 Found URLs file: {args.input}")
-        urls = []
-        with open(args.input, 'r', encoding='utf-8') as f:
-            urls = [line.strip() for line in f if line.strip()]
+        urls = classifier.load_urls_from_file(args.input)
     else:
         print(f"⚠️ File '{args.input}' not found!")
         print("📝 Using sample URLs instead:")
