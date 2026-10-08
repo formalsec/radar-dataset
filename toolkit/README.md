@@ -90,14 +90,14 @@ Important `radar_summary` fields include agent counts and evidence, tool counts 
 
 Stores are reported per instance:
 
-- `n_stores` and `store_evidence`: one entry per store creation, identified as `file:line`, with its framework, `n_writes`, `n_reads`, the agents it is linked to, and a `role` (`read_write`, `write_only`, `read_only`, `unused`). A store that is written but never read is a log or sink rather than retrieval memory.
+- `n_stores` and `store_evidence`: one entry per store creation, identified as `file:line:column`, with its framework, `n_writes`, `n_reads`, the agents it is linked to, and a `role` (`read_write`, `write_only`, `read_only`, `unused`). A store that is written but never read is a log or sink rather than retrieval memory.
 - `store_frameworks`, `rag_write_frameworks`, `rag_read_frameworks`: the frameworks of the stores created, written, and read.
 - `n_stores_written`, `n_stores_read`: how many distinct stores are written and read.
 - `write` and `read` findings carry a `store` field naming the instance they target.
 
 Each record also has `framework_usage`, a stricter version of the crawler's dependency filter:
 
-- `instantiated`: frameworks with at least one call, decorator, or subclass in the scanned code whose name traces back to an import of the framework's package (`call_counts` has the numbers).
+- `instantiated`: frameworks with at least one call, decorator, subclass, or JSX element in the scanned code whose name traces back to an import of the framework's package (`call_counts` has the numbers).
 - `imported_only`: imported somewhere but never called.
 - `declared_only`: found by the crawler in the dependency manifest but not imported in the scanned code.
 - `passes_instantiation_filter`: true when `instantiated` is not empty.

@@ -59,7 +59,7 @@ RELEVANT_EXTENSIONS = set(EXTENSION_LANGUAGE_MAP.keys())
 
 # Test files colocated next to source (not inside test/tests dirs) -- confirmed a major over-count source, e.g. getpaseo/paseo's agent-manager.test.ts alone contributed 180 of its 609 detected "agents".
 EXCLUDED_FILENAME_RE = re.compile(
-    r"\.(?:test|spec)\.[jt]sx?$|(?:^|/)test_[^/]+\.py$|_test\.py$", re.IGNORECASE
+    r"\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|/)test_[^/]+\.py$|_test\.py$", re.IGNORECASE
 )
 
 
@@ -110,6 +110,16 @@ def iter_tarball_source_files(tar_bytes):
             yield rel, text, member.size, True
 
 
+def _store_id(rel, ref):
+    """A store instance's repo-wide id. `ref` is what the detector attaches
+    to a site: the creation's (line, col) in this file, or already a
+    "file:line:col" id for a store imported from another file. The column
+    keeps two stores created on one line apart."""
+    if ref is None or isinstance(ref, str):
+        return ref
+    return f"{rel}:{ref[0]}:{ref[1]}"
+
+
 def _python_module_keys(rel):
     """Every dotted path a Python file can be imported as: `src/app/store.py`
     -> {"store", "app.store", "src.app.store"}. All suffixes, because the
@@ -125,7 +135,7 @@ def _collect_exports(results):
     """
     First-pass output -> the external_exports table analyze_source takes:
     {"stores": {module: {var: framework}}, "agents": {...},
-     "store_ids": {module: {var: "file:line"}}}.
+     "store_ids": {module: {var: "file:line:col"}}}.
 
     `module` is each dotted path the file can be imported as (Python) or its
     repo-relative path (JS/TS). Built from store_vars/agent_vars, so a
@@ -145,10 +155,10 @@ def _collect_exports(results):
     for rel, result in results.items():
         modules = _python_module_keys(rel) if result.language == "python" else {rel}
         for module in modules:
-            for var, (framework, line) in result.store_vars.items():
-                if "." not in var and line is not None:
+            for var, (framework, ref) in result.store_vars.items():
+                if "." not in var and ref is not None:
                     put("stores", module, var, framework, rel)
-                    put("store_ids", module, var, f"{rel}:{line}", rel)
+                    put("store_ids", module, var, _store_id(rel, ref), rel)
             for var, framework in result.agent_vars.items():
                 if "." not in var:
                     put("agents", module, var, framework, rel)
@@ -207,7 +217,7 @@ def scan_tarball(detector, tar_bytes):
     findings = []
     agent_instances = []   # kept internally for radar_summary math (not returned raw)
     custom_agent_instances = []
-    stores = {}  # "file:line" -> one entry per store instance
+    stores = {}  # "file:line:col" -> one entry per store instance
     store_agent_links = []
     write_sites = []
     read_sites = []
@@ -249,10 +259,6 @@ def scan_tarball(detector, tar_bytes):
                     text, rel, size_bytes=size_bytes,
                     javascript_sources=javascript_sources, external_exports=exports)
 
-    def store_id(rel, ref):
-        # a creation line in this file, or already a "file:line" id for an imported store
-        return ref if isinstance(ref, str) or ref is None else f"{rel}:{ref}"
-
     local_python_modules = {
         module for rel, result in results.items() if result.language == "python"
         for module in _python_module_keys(rel)
@@ -276,7 +282,7 @@ def scan_tarball(detector, tar_bytes):
         for f in result.findings:
             f = {**f, "file": rel}
             if "store" in f:
-                f["store"] = store_id(rel, f["store"])
+                f["store"] = _store_id(rel, f["store"])
             findings.append(f)
 
         for a in result.named_agents:
@@ -284,16 +290,17 @@ def scan_tarball(detector, tar_bytes):
         for c in result.custom_agents:
             custom_agent_instances.append(c)
         for s in result.named_stores:
-            stores.setdefault(f"{rel}:{s['line']}", {
-                "id": f"{rel}:{s['line']}", "variable": s["variable"], "framework": s["framework"],
+            sid = _store_id(rel, (s["line"], s["col"]))
+            stores[sid] = {
+                "id": sid, "variable": s["variable"], "framework": s["framework"],
                 "file": rel, "line": s["line"], "n_writes": 0, "n_reads": 0, "agents": set(),
-            })
+            }
         for link in result.store_agent_links:
-            store_agent_links.append({**link, "store_id": store_id(rel, link.get("store_ref"))})
+            store_agent_links.append({**link, "store_id": _store_id(rel, link.get("store_ref"))})
         for w in result.write_sites:
-            write_sites.append({**w, "store_id": store_id(rel, w.get("store"))})
+            write_sites.append({**w, "store_id": _store_id(rel, w.get("store"))})
         for r in result.read_sites:
-            read_sites.append({**r, "store_id": store_id(rel, r.get("store"))})
+            read_sites.append({**r, "store_id": _store_id(rel, r.get("store"))})
 
         for imp in result.imports:
             if imp["framework"] and not (is_python and _is_local_python_import(imp["canonical"], local_python_modules)):
@@ -357,7 +364,7 @@ def scan_tarball(detector, tar_bytes):
     n_tools = len(tools_bound_all)
     has_rag = len(stores) > 0
 
-    # Everything below is keyed by store INSTANCE (its "file:line" id), not
+    # Everything below is keyed by store INSTANCE (its "file:line:col" id), not
     # by variable name: two unrelated `kb` variables in different files are
     # two stores, and one store imported into three files is still one.
     for link in store_agent_links:

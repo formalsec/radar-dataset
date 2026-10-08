@@ -166,6 +166,8 @@ EXTENSION_LANGUAGE_MAP = {
     ".cjs": "javascript",
     ".ts": "javascript",
     ".tsx": "javascript",
+    ".mts": "javascript",
+    ".cts": "javascript",
 }
 
 DEFAULT_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024  # Mudar
@@ -243,8 +245,8 @@ class FileResult:
     # imported"); scan_api's framework_usage is built from the two.
     framework_uses: dict = field(default_factory=dict)
     # Every variable that holds a store or agent in this file, handles and
-    # aliases included: store_vars[var] = (framework, creation line or
-    # "file:line" id), agent_vars[var] = framework. What another file can
+    # aliases included: store_vars[var] = (framework, creation (line, col)
+    # or "file:line:col" id), agent_vars[var] = framework. What another file can
     # import by name -- see scan_api._collect_exports.
     store_vars: dict = field(default_factory=dict)
     agent_vars: dict = field(default_factory=dict)
@@ -361,7 +363,7 @@ class PatternDetector:
         """
         external_exports: optional {"stores": {module: {var: framework}},
         "agents": {module: {var: framework}}, "store_ids": {module: {var:
-        "file:line"}}} collected from a FIRST pass over the repo, letting
+        "file:line:col"}}} collected from a FIRST pass over the repo, letting
         this file resolve a store OR agent it imported from another file
         (`from store import kb`, `from agents import researcher`,
         `import { kb } from "./store"`) -- without it, a write/read/call
@@ -850,14 +852,18 @@ def _resolve_store_handles(tree, *store_dicts):
                     changed = True
 
 
-def _store_ref_at(variable, line, store_ref_by_var, creation_lines_by_var):
-    """Which store `variable` is at `line`. A name created more than once
-    in a file (`client = chromadb.Client()` in two functions) resolves to
-    the closest creation above the use, not to whichever came last."""
-    lines = creation_lines_by_var.get(variable, ())
-    if len(lines) > 1:
-        return max((l for l in lines if l <= line), default=min(lines))
-    return store_ref_by_var.get(variable)
+def _store_at(variable, line, store_framework_by_var, store_ref_by_var, store_history):
+    """-> (framework, ref) of the store `variable` holds at `line`. A name
+    assigned a store more than once in a file (`client = chromadb.Client()`
+    in two functions, or `kb = QdrantClient()` later rebound to
+    `kb = Pinecone()`) resolves to the closest creation above the use, for
+    BOTH the framework and the instance -- not to whichever came last.
+    store_history[variable] is [((line, col), framework), ...]."""
+    creations = store_history.get(variable, ())
+    if len(creations) > 1:
+        ref, framework = max((c for c in creations if c[0][0] <= line), default=min(creations))
+        return framework, ref
+    return store_framework_by_var.get(variable), store_ref_by_var.get(variable)
 
 
 def _usage_framework(func_node, import_aliases):
@@ -2523,6 +2529,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 pending_store_calls[id(node)] = {
                     "framework": store_framework,
                     "line": node.lineno,
+                    "col": node.col_offset + 1,
                     "call_node": node,
                     "matched_call": call_text,
                 }
@@ -2681,11 +2688,12 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     # whenever a shared verb like ".add(" matched, regardless of which
     # actual store the call was on).
     store_framework_by_var = {}
-    # variable -> WHICH store it is: the creation's line in this file, or
-    # a "file:line" id for a store imported from another file. This is what
-    # lets a write/read name the specific store instance it targets.
+    # variable -> WHICH store it is: the creation's (line, column) in this
+    # file, or a "file:line:col" id for a store imported from another file.
+    # This is what lets a write/read name the specific store instance it
+    # targets.
     store_ref_by_var = {}
-    store_creation_lines = {}
+    store_history = {}
     wrapped_store_receivers = {}
     prelim_store_framework = {
         assign_target_for_call[cid]: e["framework"]
@@ -2702,11 +2710,11 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             continue  # same store as the receiver -- don't count a second one
         if var_name:
             store_framework_by_var[var_name] = entry["framework"]
-            store_ref_by_var[var_name] = entry["line"]
-            store_creation_lines.setdefault(var_name, []).append(entry["line"])
+            store_ref_by_var[var_name] = (entry["line"], entry["col"])
+            store_history.setdefault(var_name, []).append(((entry["line"], entry["col"]), entry["framework"]))
         named_stores.append({
             "variable": var_name, "framework": entry["framework"], "line": entry["line"],
-            "matched_call": entry["matched_call"],
+            "col": entry["col"], "matched_call": entry["matched_call"],
         })
     for var_name, receiver in wrapped_store_receivers.items():
         if receiver in store_ref_by_var:
@@ -2812,7 +2820,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
         if linked_store is not None:
             store_agent_links.append({
                 "store": linked_store,
-                "store_ref": store_ref_by_var.get(linked_store),
+                "store_ref": _store_at(linked_store, entry["line"], store_framework_by_var,
+                                       store_ref_by_var, store_history)[1],
                 "agent": entry["name"] or agent_var_by_call_id.get(call_id),
                 "line": entry["line"],
             })
@@ -2838,7 +2847,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             if _match_constructor_text(method_text, rag_writes_category, require_confirmation=False) is None:
                 continue
             receiver = _resolve_store_receiver(node.func)
-            framework = store_framework_by_var.get(receiver)
+            framework, store_ref = _store_at(receiver, node.lineno, store_framework_by_var,
+                                             store_ref_by_var, store_history)
             if framework is None or _is_store_handle_accessor(node.func):
                 continue
             # NB: named `taint_source`, NOT `source` -- an earlier version
@@ -2850,8 +2860,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             sanitized_nearby = _has_sanitizer_nearby(source_lines, node.lineno) if tainted else False
             write_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": framework,
-                "store": _store_ref_at(receiver, node.lineno, store_ref_by_var, store_creation_lines),
+                "framework": framework, "store": store_ref,
                 "tainted": tainted, "taint_source": taint_source,
                 "sanitizer_nearby": sanitized_nearby,
                 "unsanitized": tainted and not sanitized_nearby,
@@ -2928,7 +2937,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             if _match_constructor_text(method_text, rag_reads_category, require_confirmation=False) is None:
                 continue
             receiver = _resolve_store_receiver(node.func)
-            framework = store_framework_by_var.get(receiver)
+            framework, store_ref = _store_at(receiver, node.lineno, store_framework_by_var,
+                                             store_ref_by_var, store_history)
             # `.as_retriever(` is both a handle accessor and a read pattern
             # (wiring a retriever IS the read); `collections.get(` is not.
             if framework is None or (_is_store_handle_accessor(node.func)
@@ -2936,8 +2946,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 continue
             read_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": framework,
-                "store": _store_ref_at(receiver, node.lineno, store_ref_by_var, store_creation_lines),
+                "framework": framework, "store": store_ref,
             })
 
     # call_sites: same confirmed-framework-only filter, resolved against
@@ -3209,12 +3218,51 @@ def _js_store_receiver(callee):
     return _js_identity(node)
 
 
+def _js_root_identifier(node):
+    """The identifier an `a.b().c` chain starts from, or None (`this`, a
+    literal, a parenthesised expression)."""
+    node = js_ast.unwrap(node)
+    while node is not None and node.type in ("member_expression", "call_expression"):
+        node = js_ast.unwrap(node.child_by_field_name(
+            "object" if node.type == "member_expression" else "function"))
+    return node if node is not None and node.type == "identifier" else None
+
+
+_JS_GRAPH_BUILDER_METHODS = {"addNode", "addEdge", "addConditionalEdges"}
+
+
+def _js_is_graph_compile(callee, graph_vars):
+    """`x.compile()` only counts as an agent graph when `x` is one: a
+    variable a StateGraph was assigned to or `.addNode(` was called on, or
+    a builder chain (`new StateGraph(S).addNode(..).compile()`). Any other
+    `.compile(` in the same file is a template/regex/schema compiler."""
+    callee = js_ast.unwrap(callee)
+    if callee is None or callee.type != "member_expression":
+        return False
+    if _js_identity(callee) in graph_vars:
+        return True
+    node = js_ast.unwrap(callee.child_by_field_name("object"))
+    while node is not None:
+        if node.type == "member_expression":
+            if js_ast.text(node.child_by_field_name("property")) in _JS_GRAPH_BUILDER_METHODS:
+                return True
+            node = js_ast.unwrap(node.child_by_field_name("object"))
+        elif node.type in ("call_expression", "new_expression"):
+            func = node.child_by_field_name("function" if node.type == "call_expression" else "constructor")
+            if _js_callee_text(func).endswith("StateGraph"):
+                return True
+            node = js_ast.unwrap(func)
+        else:
+            break
+    return False
+
+
 def _js_local_module_paths(filename, module):
     """Repo paths a relative import specifier can resolve to, in the order
     _js_tools tries them."""
     target = posixpath.normpath(posixpath.join(posixpath.dirname(filename), module))
     stem = posixpath.splitext(target)[0]
-    exts = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+    exts = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
     return ([target] + [stem + e for e in exts] + [target + e for e in exts]
             + [f"{target}/index{e}" for e in exts])
 
@@ -3276,10 +3324,8 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
     def record_use(ident):
         """Count a call/`new`/JSX element whose root name is an import of a
         tracked package -- see FileResult.framework_uses."""
-        while ident is not None and ident.type in ("member_expression", "call_expression"):
-            ident = js_ast.unwrap(ident.child_by_field_name(
-                "object" if ident.type == "member_expression" else "function"))
-        if ident is None or ident.type != "identifier":
+        ident = _js_root_identifier(ident)
+        if ident is None:
             return
         binding = js_ast.visible_binding(ident, aliases, shadows)
         framework = js_ast.package_framework(binding.module) if binding else None
@@ -3292,7 +3338,7 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
         return framework is not None and (langs is None or "javascript" in langs)
 
     calls = []
-    has_graph_context = False
+    graph_vars = set()
     for node in js_ast.walk(root):
         if node.type == "call_expression":
             callee, is_new = node.child_by_field_name("function"), False
@@ -3303,13 +3349,31 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
         elif node.type in ("jsx_opening_element", "jsx_self_closing_element"):
             record_use(js_ast.unwrap(node.child_by_field_name("name")))  # <CopilotKit ...>
             continue
+        elif node.type == "class_heritage":
+            # `class X extends Base` -- JS puts the expression right here,
+            # TS wraps it in an extends_clause (implements_clause is types).
+            for child in node.named_children:
+                bases = (child.children_by_field_name("value") if child.type == "extends_clause"
+                         else [] if child.type == "implements_clause" else [child])
+                for base in bases:
+                    if base.type != "call_expression":  # a mixin call is already counted as a call
+                        record_use(base)
+            continue
+        elif node.type == "decorator":
+            expr = node.named_children[0] if node.named_children else None
+            if expr is not None and expr.type != "call_expression":
+                record_use(expr)
+            continue
         else:
             continue
         record_use(js_ast.unwrap(callee))
         callee_text = _js_callee_text(callee)
-        if callee_text.endswith(("StateGraph", ".addNode")):
-            has_graph_context = True
+        if callee_text.endswith("StateGraph"):
+            graph_vars.add(_js_assign_target(node))
+        elif callee_text.endswith(".addNode"):
+            graph_vars.add(_js_identity(callee))
         calls.append((node, callee, callee_text, is_new))
+    graph_vars.discard(None)
 
     store_frameworks = set(rag_creation_category.frameworks) if rag_creation_category else set()
     pending_agents, pending_stores = {}, {}
@@ -3329,14 +3393,14 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
         agent_framework = match(agent_creation_category, "agent_creation") if agent_creation_category else None
         if agent_framework == "MCP SDK":
             agent_framework = None  # new McpServer( is a tool server, not an agent
-        if agent_framework == "Graph Compile" and not has_graph_context:
-            agent_framework = None  # `.compile(` with no graph in sight (regex, templates, ...)
+        if agent_framework == "Graph Compile" and not _js_is_graph_compile(callee, graph_vars):
+            agent_framework = None  # `.compile(` on something that isn't a graph (regex, templates, ...)
         if agent_framework is None and is_new and _js_is_custom_agent(node, callee, aliases):
             agent_framework = "Custom"
         if agent_framework is not None:
             pending_agents[js_ast.key(node)] = {
                 "node": node, "callee": callee, "framework": agent_framework,
-                "line": js_ast.line(node), "matched_call": call_text,
+                "line": js_ast.line(node), "col": node.start_point[1] + 1, "matched_call": call_text,
             }
             continue  # a call site is either an agent or a store, not both
 
@@ -3350,7 +3414,7 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
         if store_framework is not None:
             pending_stores[js_ast.key(node)] = {
                 "node": node, "callee": callee, "framework": store_framework,
-                "line": js_ast.line(node), "matched_call": call_text,
+                "line": js_ast.line(node), "col": node.start_point[1] + 1, "matched_call": call_text,
             }
 
     file_tokens = None
@@ -3367,9 +3431,10 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
 
     def resolve(pending):
         """Assignment targets + wrap filtering, as in _reduce_python. Also
-        returns variable -> framework and variable -> creation line for
-        every variable holding one of these objects, wrapped ones included
-        (`app = graph.compile()` is still the agent)."""
+        returns variable -> framework, variable -> creation (line, col) and
+        the per-variable creation history, for every variable holding one
+        of these objects, wrapped ones included (`app = graph.compile()` is
+        still the agent)."""
         targets = {k: _js_assign_target(e["node"]) for k, e in pending.items()}
         prelim = {targets[k]: e["framework"] for k, e in pending.items() if targets[k]}
         wrapped = {}
@@ -3383,11 +3448,11 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
                 targets[inner] = targets[k]  # `const app = new StateGraph(S)...compile()`
         kept = [(targets[k], e) for k, e in pending.items() if k not in wrapped]
         framework_by_var = {var: e["framework"] for var, e in kept if var}
-        line_by_var = {var: e["line"] for var, e in kept if var}
-        lines_by_var = {}
+        line_by_var = {var: (e["line"], e["col"]) for var, e in kept if var}
+        history = {}
         for var, e in kept:
             if var:
-                lines_by_var.setdefault(var, []).append(e["line"])
+                history.setdefault(var, []).append(((e["line"], e["col"]), e["framework"]))
         for k, (framework, inner) in wrapped.items():
             var = targets[k]
             if not var:
@@ -3396,10 +3461,10 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
             receiver = targets[inner] if inner is not None else _js_identity(pending[k]["callee"])
             if receiver in line_by_var:
                 line_by_var.setdefault(var, line_by_var[receiver])
-        return sorted(kept, key=lambda item: item[1]["line"]), framework_by_var, line_by_var, lines_by_var
+        return sorted(kept, key=lambda item: (item[1]["line"], item[1]["col"])), framework_by_var, line_by_var, history
 
     kept_agents, agent_framework_by_var, _, _ = resolve(pending_agents)
-    kept_stores, store_framework_by_var, store_ref_by_var, store_creation_lines = resolve(pending_stores)
+    kept_stores, store_framework_by_var, store_ref_by_var, store_history = resolve(pending_stores)
     named_agents = [{
         "name": _js_name_option(e["node"]) or var_name, "framework": e["framework"],
         "line": e["line"], "tools_bound": tools_bound(e["node"]),
@@ -3407,31 +3472,46 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
     } for var_name, e in kept_agents]
     named_stores = [{
         "variable": var_name, "framework": e["framework"], "line": e["line"],
-        "matched_call": e["matched_call"],
+        "col": e["col"], "matched_call": e["matched_call"],
     } for var_name, e in kept_stores]
 
     # Cross-file: a store/agent created in another module and imported here
     # by name through a relative import. Same evidence rule as Python -- a
     # real import in THIS file of a variable the first pass saw that module
-    # create -- and a local creation or a re-declaration always wins.
+    # create -- and a local creation always wins. A re-declaration only
+    # hides the import inside its own scope (`function f(kb) {..}`), so
+    # that is checked per use below, with `imported_here`.
+    external_names = set()
     if external_exports:
-        redeclared = {name for names in shadows.values() for name in names}
+        redeclared_at_top = shadows.get(js_ast.key(root), ())
         for local, binding in aliases.items():
-            if (binding.export in (None, "default") or local in redeclared
+            if (binding.export in (None, "default") or local in redeclared_at_top
                     or not (binding.module or "").startswith(".")):
                 continue
             for path in _js_local_module_paths(filename, binding.module):
                 agent_fw = (external_exports.get("agents") or {}).get(path, {}).get(binding.export)
                 store_fw = (external_exports.get("stores") or {}).get(path, {}).get(binding.export)
-                if agent_fw:
-                    agent_framework_by_var.setdefault(local, agent_fw)
+                if agent_fw and local not in agent_framework_by_var:
+                    agent_framework_by_var[local] = agent_fw
+                    external_names.add(local)
                 if store_fw and local not in store_framework_by_var:
                     store_framework_by_var[local] = store_fw
+                    external_names.add(local)
                     store_id = (external_exports.get("store_ids") or {}).get(path, {}).get(binding.export)
                     if store_id:
                         store_ref_by_var[local] = store_id
                 if agent_fw or store_fw:
                     break
+
+    def imported_here(expr):
+        """False when `expr` starts from a name that IS an imported
+        store/agent at file level but is re-declared in the scope of this
+        use (a parameter or local of the same name)."""
+        ident = js_ast.unwrap(expr)
+        if ident is not None and ident.type != "shorthand_property_identifier":
+            ident = _js_root_identifier(ident)
+        return (ident is None or js_ast.text(ident) not in external_names
+                or js_ast.visible_binding(ident, aliases, shadows) is not None)
 
     # Aliases (`const worker = kb`) and store handles (`const col = await
     # client.getOrCreateCollection(..)`), to a fixed point as in Python.
@@ -3468,7 +3548,7 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
                 tables = (store_framework_by_var, store_ref_by_var)
             else:
                 continue
-            if source_var is None or source_var == target:
+            if source_var is None or source_var == target or not imported_here(value):
                 continue
             for table in tables:
                 if source_var in table and target not in table:
@@ -3484,9 +3564,11 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
             if value is None:
                 continue
             linked = js_ast.text(value) if value.type == "shorthand_property_identifier" else _js_identity(value)
-            if linked in store_framework_by_var:
+            if linked in store_framework_by_var and imported_here(value):
                 store_agent_links.append({
-                    "store": linked, "store_ref": store_ref_by_var.get(linked),
+                    "store": linked,
+                    "store_ref": _store_at(linked, e["line"], store_framework_by_var,
+                                           store_ref_by_var, store_history)[1],
                     "agent": _js_name_option(e["node"]) or var_name, "line": e["line"],
                 })
                 break
@@ -3504,7 +3586,10 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
         method = js_ast.text(callee.child_by_field_name("property"))
         method_text = f".{method}("
         receiver = _js_store_receiver(callee)
-        store_framework = store_framework_by_var.get(receiver)
+        store_framework, store_ref = _store_at(receiver, js_ast.line(node), store_framework_by_var,
+                                               store_ref_by_var, store_history)
+        if not imported_here(callee):
+            store_framework = None
         is_handle = _js_is_store_handle_accessor(callee)
         if store_framework is not None and not is_handle and _match_constructor_text(
                 method_text, rag_writes_category, require_confirmation=False) is not None:
@@ -3513,8 +3598,7 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
                 source_lines, js_ast.line(node), keywords=_JS_SANITIZER_KEYWORDS) if tainted else False
             write_sites.append({
                 "line": js_ast.line(node), "variable": receiver, "method": method,
-                "framework": store_framework,
-                "store": _store_ref_at(receiver, js_ast.line(node), store_ref_by_var, store_creation_lines),
+                "framework": store_framework, "store": store_ref,
                 "tainted": tainted, "taint_source": taint_source,
                 "sanitizer_nearby": sanitized_nearby,
                 "unsanitized": tainted and not sanitized_nearby,
@@ -3523,12 +3607,11 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
                 method_text, rag_reads_category, require_confirmation=False) is not None:
             read_sites.append({
                 "line": js_ast.line(node), "variable": receiver, "method": method,
-                "framework": store_framework,
-                "store": _store_ref_at(receiver, js_ast.line(node), store_ref_by_var, store_creation_lines),
+                "framework": store_framework, "store": store_ref,
             })
         agent_receiver = _js_identity(callee)
         agent_framework = agent_framework_by_var.get(agent_receiver)
-        if agent_framework is not None and _match_constructor_text(
+        if agent_framework is not None and imported_here(callee) and _match_constructor_text(
                 method_text, agent_calls_category, require_confirmation=False) is not None:
             call_sites.append({
                 "line": js_ast.line(node), "variable": agent_receiver, "method": method,

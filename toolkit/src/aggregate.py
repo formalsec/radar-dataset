@@ -87,8 +87,13 @@ def main():
         print(f"--repos: {len(records)} of {n_in_file} records are in {args.repos} ({len(keep)} listed)")
     n_not_instantiating = 0
     if args.require_instantiation:
-        if not any("framework_usage" in r for r in records):
-            raise SystemExit("--require-instantiation needs a scan with framework_usage; re-run scan_api.")
+        # Every scanned record, not just one: a scan resumed from an older
+        # file mixes records with and without the field, and the ones
+        # without would silently be dropped as "not instantiating".
+        missing = [r for r in records if r.get("status") == "scanned" and "framework_usage" not in r]
+        if missing:
+            raise SystemExit(f"--require-instantiation: {len(missing)} scanned records have no framework_usage "
+                             f"(e.g. {missing[0].get('repo_name')}); re-run scan_api on them first.")
         dropped = [r for r in records if r.get("status") == "scanned"
                    and not r.get("framework_usage", {}).get("passes_instantiation_filter")]
         n_not_instantiating = len(dropped)
