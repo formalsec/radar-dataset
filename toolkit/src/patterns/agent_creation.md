@@ -42,7 +42,7 @@ bundled-library creation sites.
 | Framework | Detection Patterns |
 |-----------|-------------------|
 | **LangChain.js** | `createReactAgent(`<br>`createOpenAIToolsAgent(`<br>`createToolCallingAgent(`<br>`new AgentExecutor(` |
-| **LangGraph.js** | `new StateGraph(`<br>`.addNode(`<br>`.compile(` |
+| **LangGraph.js** | `new StateGraph(`<br>`.addNode(`<br>`.compile(`<br>`createReactAgent(` *(from @langchain/langgraph/prebuilt; the import decides between this row and LangChain.js)* |
 | **Mastra** | `new Mastra(`<br>`createAgent(`<br>`@mastra/core`<br>`new Agent(`<br>`new Agent<[^>]*>\s*\(`<br>`MastraAgent` |
 | **Vercel AI SDK** | `generateText(`<br>`streamText(`<br>`from 'ai'`<br>`from '@ai-sdk/` |
 | **ElizaOS** | `createEliza(`<br>`ElizaAgent(`<br>`new AgentRuntime(`<br>`@elizaos/core` |

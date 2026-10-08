@@ -2,22 +2,64 @@
 aggregate.py
 
 Reads a scan_api.py output file (a JSON array of per-repo records, possibly
-still being written to) and reports n_agents/n_tools per repo plus totals
-across the corpus. Uses incremental_json.repair_and_load so it also works
-on a scan that's still in progress -- any trailing partial record is
+still being written to) and reports n_agents/n_tools/n_skills per repo plus
+totals across the corpus. Uses incremental_json.repair_and_load so it also
+works on a scan that's still in progress -- any trailing partial record is
 dropped rather than crashing the load.
+
+This is the counting step of the pipeline. --repos restricts it to the
+repositories that survived the earlier filters, and the CSV (one row per
+repo) plus the totals JSON (corpus totals and the per-count distributions)
+are what the charts are built from.
 
 Run with:
     python -m toolkit.src.aggregate toolkit/output/scan_results/full_corpus_scan.json
+    python -m toolkit.src.aggregate <scan.json> --repos <surviving repos> --require-instantiation
 """
 
 import argparse
 import csv
 import json
 import sys
+from collections import Counter
+from pathlib import Path
 
 from .incremental_json import repair_and_load
 from .util import utc_now_compact
+
+COUNT_FIELDS = ("n_agents", "n_custom_agents", "n_tools", "n_skills", "n_stores")
+
+
+def _repo_key(value):
+    """`https://github.com/Owner/Repo(.git)` or `Owner/Repo` -> "owner/repo"."""
+    value = (value or "").strip().rstrip("/").removesuffix(".git")
+    return "/".join(value.split("/")[-2:]).lower()
+
+
+def load_repo_filter(path):
+    """
+    The repositories to keep, as a set of "owner/repo" keys. Accepts what
+    the earlier pipeline steps write:
+      - a text file with one URL or owner/repo per line
+      - a JSON list of URLs, or of objects with a url/name field
+      - a manifest ({"repos": [...]}, e.g. dataset/all_repos.json)
+      - a classifier output ({"results": [{"url", "classification"}]}),
+        of which only the entries classified "app" are kept
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    if not path.endswith(".json"):
+        return {_repo_key(line) for line in text.splitlines() if line.strip()}
+    data = json.loads(text)
+    if isinstance(data, dict):
+        data = data.get("results") or data.get("repos") or data.get("urls") or []
+    keep = set()
+    for entry in data:
+        if isinstance(entry, str):
+            keep.add(_repo_key(entry))
+        elif entry.get("classification", "app") == "app":
+            keep.add(_repo_key(entry.get("url") or entry.get("repo_url")
+                               or entry.get("name") or entry.get("repo_name")))
+    return keep - {""}
 
 
 def main():
@@ -29,9 +71,30 @@ def main():
     ap.add_argument("--totals-json", default=f"toolkit/output/aggregate_results/app_corpus_totals_{output_timestamp}.json",
                     help="write corpus-wide totals to this JSON path (default: timestamped file in toolkit/output/aggregate_results)")
     ap.add_argument("--top", type=int, default=20, help="how many repos to print, ranked by n_agents (default 20)")
+    ap.add_argument("--repos", default=None,
+                    help="only count repositories listed in this file: a URL list, a manifest, or a "
+                         "classifier output (its \"app\" entries). See load_repo_filter.")
+    ap.add_argument("--require-instantiation", action="store_true",
+                    help="only count repositories whose code actually calls a tracked framework "
+                         "(framework_usage.passes_instantiation_filter), not just imports or declares one")
     args = ap.parse_args()
 
     records = repair_and_load(args.scan_json)
+    n_in_file = len(records)
+    if args.repos:
+        keep = load_repo_filter(args.repos)
+        records = [r for r in records if _repo_key(r.get("repo_url") or r.get("repo_name")) in keep]
+        print(f"--repos: {len(records)} of {n_in_file} records are in {args.repos} ({len(keep)} listed)")
+    n_not_instantiating = 0
+    if args.require_instantiation:
+        if not any("framework_usage" in r for r in records):
+            raise SystemExit("--require-instantiation needs a scan with framework_usage; re-run scan_api.")
+        dropped = [r for r in records if r.get("status") == "scanned"
+                   and not r.get("framework_usage", {}).get("passes_instantiation_filter")]
+        n_not_instantiating = len(dropped)
+        dropped_ids = {id(r) for r in dropped}
+        records = [r for r in records if id(r) not in dropped_ids]
+        print(f"--require-instantiation: dropped {n_not_instantiating} repos that never call a tracked framework")
     scanned = [r for r in records if r.get("status") == "scanned" and r.get("radar_summary")]
     failed = [r for r in records if r.get("status") != "scanned"]
 
@@ -40,6 +103,7 @@ def main():
         rs = r["radar_summary"]
         rows.append({
             "repo_name": r.get("repo_name"),
+            "repo_url": r.get("repo_url"),
             "stars": r.get("stars"),
             "n_agents": rs.get("n_agents", 0),
             "n_custom_agents": rs.get("n_custom_agents", 0),
@@ -47,6 +111,8 @@ def main():
             "n_skills": rs.get("n_skills", 0),
             "n_tool_definition_markers": rs.get("n_tool_definition_markers", 0),
             "has_rag": rs.get("has_rag", False),
+            "n_stores": rs.get("n_stores", 0),
+            "passes_instantiation_filter": r.get("framework_usage", {}).get("passes_instantiation_filter"),
         })
 
     rows.sort(key=lambda x: x["n_agents"], reverse=True)
@@ -60,7 +126,7 @@ def main():
     n_repos_with_skills = sum(1 for x in rows if x["n_skills"] > 0)
     n_repos_with_rag = sum(1 for x in rows if x["has_rag"])
 
-    print(f"Records in file: {len(records)}  (scanned={len(scanned)}, failed={len(failed)})\n")
+    print(f"Records counted: {len(records)}  (scanned={len(scanned)}, failed={len(failed)})\n")
 
     print(f"{'repo_name':<50} {'stars':>8} {'n_agents':>9} {'n_custom':>9} {'n_tools':>8} {'n_skills':>8} {'has_rag':>8}")
     for x in rows[:args.top]:
@@ -88,17 +154,20 @@ def main():
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["repo_name", "stars", "n_agents",
+            writer = csv.DictWriter(f, fieldnames=["repo_name", "repo_url", "stars", "n_agents",
                                                      "n_custom_agents", "n_tools",
                                                      "n_skills",
-                                                     "n_tool_definition_markers", "has_rag"])
+                                                     "n_tool_definition_markers", "has_rag",
+                                                     "n_stores", "passes_instantiation_filter"])
             writer.writeheader()
             writer.writerows(rows)
         print(f"\nWrote per-repo CSV to {args.csv}")
 
     if args.totals_json:
         totals = {
-            "repos_in_file": len(records),
+            "repos_in_file": n_in_file,
+            "repos_counted": len(records),
+            "repos_dropped_not_instantiating": n_not_instantiating,
             "repos_scanned": len(scanned),
             "repos_failed": len(failed),
             "total_n_agents": total_agents,
@@ -109,6 +178,12 @@ def main():
             "repos_with_at_least_1_tool": n_repos_with_tools,
             "repos_with_at_least_1_skill": n_repos_with_skills,
             "repos_with_rag": n_repos_with_rag,
+            "total_n_stores": sum(x["n_stores"] for x in rows),
+            # value -> number of repos with that value, for histograms
+            "distributions": {
+                field: {str(value): n for value, n in sorted(Counter(x[field] for x in rows).items())}
+                for field in COUNT_FIELDS
+            },
         }
         with open(args.totals_json, "w", encoding="utf-8") as f:
             json.dump(totals, f, indent=2)
