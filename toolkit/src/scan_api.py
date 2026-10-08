@@ -6,14 +6,19 @@ pattern_detector.py: named_stores, store_agent_links, write_sites, read_sites.
 Produces shared_across_agents, rag_writers, rag_readers, unsanitized_writes --
 the RADAR paper's Structure/RAG metadata fields -- as repo-summary output.
 
+Each repo is analysed in two passes: the first finds every store and agent,
+the second re-analyses the files that import one of them from another file
+(see _collect_exports), so a write, read, call or `Agent(memory=kb)` link
+made in a different file from the creation is attributed to that specific
+store/agent.
+
 KNOWN LIMITATIONS (disclosed, not hidden):
-  - store_agent_links and write/read attribution are SINGLE-FILE. A store
-    created in one file and used by an agent constructed in another file
-    (a real pattern -- seen in AI-Citizen/SolidGPT, where the Qdrant client
-    lives in util.py and the agents live in autogenmanager.py) is NOT
-    linked. shared_across_agents / rag_writers / rag_readers will
-    under-count in exactly this situation. Fixing this needs a cross-file
-    resolution pass, not implemented here.
+  - Cross-file resolution is ONE hop through a direct named import
+    (`from util import client`, `import { kb } from "./store"`). A store
+    that reaches its user through a function parameter, a return value, a
+    re-export (`export * from`), a default export or a tsconfig path alias
+    is still not linked, and shared_across_agents / rag_writers /
+    rag_readers under-count in exactly those situations.
   - Aliased imports (`from chromadb import Client as ChromaClient`) are not
     resolved back to their canonical constructor name, so both agent and
     store detection can miss aliased constructor calls. Same root cause as
@@ -54,7 +59,7 @@ RELEVANT_EXTENSIONS = set(EXTENSION_LANGUAGE_MAP.keys())
 
 # Test files colocated next to source (not inside test/tests dirs) -- confirmed a major over-count source, e.g. getpaseo/paseo's agent-manager.test.ts alone contributed 180 of its 609 detected "agents".
 EXCLUDED_FILENAME_RE = re.compile(
-    r"\.(?:test|spec)\.[jt]sx?$|(?:^|/)test_[^/]+\.py$|_test\.py$", re.IGNORECASE
+    r"\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|/)test_[^/]+\.py$|_test\.py$", re.IGNORECASE
 )
 
 
@@ -105,6 +110,93 @@ def iter_tarball_source_files(tar_bytes):
             yield rel, text, member.size, True
 
 
+def _store_id(rel, ref):
+    """A store instance's repo-wide id. `ref` is what the detector attaches
+    to a site: the creation's (line, col) in this file, or already a
+    "file:line:col" id for a store imported from another file. The column
+    keeps two stores created on one line apart."""
+    if ref is None or isinstance(ref, str):
+        return ref
+    return f"{rel}:{ref[0]}:{ref[1]}"
+
+
+def _python_module_keys(rel):
+    """Every dotted path a Python file can be imported as: `src/app/store.py`
+    -> {"store", "app.store", "src.app.store"}. All suffixes, because the
+    import root (src layout, a package subdirectory, a relative import whose
+    dots ast drops) isn't knowable from the file alone."""
+    parts = list(Path(rel).with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return {".".join(parts[i:]) for i in range(len(parts))}
+
+
+def _collect_exports(results):
+    """
+    First-pass output -> the external_exports table analyze_source takes:
+    {"stores": {module: {var: framework}}, "agents": {...},
+     "store_ids": {module: {var: "file:line:col"}}}.
+
+    `module` is each dotted path the file can be imported as (Python) or its
+    repo-relative path (JS/TS). Built from store_vars/agent_vars, so a
+    handle (`kb = client.get_collection(..)`) is importable like the store
+    itself. Only a plain variable can be imported by name, so `self.kb` /
+    `this.kb` are not exported. When two files could both be the `store` in
+    `from store import kb`, that name is dropped rather than guessed.
+    """
+    exports = {"stores": {}, "agents": {}, "store_ids": {}}
+    owner, ambiguous = {}, set()
+
+    def put(kind, module, var, value, rel):
+        if owner.setdefault((kind, module, var), rel) != rel:
+            ambiguous.add((module, var))
+        exports[kind].setdefault(module, {}).setdefault(var, value)
+
+    for rel, result in results.items():
+        modules = _python_module_keys(rel) if result.language == "python" else {rel}
+        for module in modules:
+            for var, (framework, ref) in result.store_vars.items():
+                if "." not in var and ref is not None:
+                    put("stores", module, var, framework, rel)
+                    put("store_ids", module, var, _store_id(rel, ref), rel)
+            for var, framework in result.agent_vars.items():
+                if "." not in var:
+                    put("agents", module, var, framework, rel)
+    for module, var in ambiguous:
+        for table in exports.values():
+            table.get(module, {}).pop(var, None)
+    return {kind: {m: v for m, v in table.items() if v} for kind, table in exports.items()}
+
+
+def _export_import_hint(exports):
+    """Cheap text prefilter for the second pass: a regex matching an import
+    line that could name an exporting module, so only those files are
+    analysed twice. None when nothing is exported."""
+    python_names, js_names = set(), set()
+    for table in (exports["stores"], exports["agents"]):
+        for module in table:
+            if "/" in module or Path(module).suffix:
+                stem = Path(module).stem
+                js_names.add(Path(module).parent.name if stem == "index" else stem)
+            else:
+                python_names.add(module.rpartition(".")[2])
+    parts = []
+    if python_names:
+        names = "|".join(sorted(map(re.escape, python_names)))
+        parts.append(rf"^[ \t]*(?:from|import)[ \t][^\n]*\b(?:{names})\b")
+    if js_names:
+        names = "|".join(sorted(map(re.escape, js_names - {""})))
+        parts.append(rf"""['"]\.{{1,2}}/[^'"\n]*(?:{names})""")
+    return re.compile("|".join(parts), re.MULTILINE) if parts else None
+
+
+def _is_local_python_import(canonical, local_modules):
+    """`from agents import researcher` in a repo with its own agents/
+    package is not the OpenAI Agents SDK. `canonical` is module.Symbol or a
+    bare module."""
+    return canonical in local_modules or canonical.rpartition(".")[0] in local_modules
+
+
 def scan_tarball(detector, tar_bytes):
     """
     Mirrors scan_local.py's scan_one_repo(), sourced from tarball bytes.
@@ -121,15 +213,15 @@ def scan_tarball(detector, tar_bytes):
     per file; it's just not aggregated into the repo-level result by default.
     """
     total_files = 0
-    files_scanned = 0
     files_with_parse_errors = 0
     findings = []
     agent_instances = []   # kept internally for radar_summary math (not returned raw)
     custom_agent_instances = []
-    store_instances = []
+    stores = {}  # "file:line:col" -> one entry per store instance
     store_agent_links = []
     write_sites = []
     read_sites = []
+    results = {}  # rel -> FileResult, in tarball order
 
     # Supply local JS/TS modules for tools passed through imported factories.
     javascript_sources = {
@@ -155,7 +247,27 @@ def scan_tarball(detector, tar_bytes):
                                          javascript_sources=javascript_sources)
         if result.skipped_reason:
             continue
-        files_scanned += 1
+        results[rel] = result
+
+    # Second pass: files importing a store/agent another file created.
+    exports = _collect_exports(results)
+    hint = _export_import_hint(exports)
+    if hint is not None:
+        for rel, text, size_bytes, is_relevant in iter_tarball_source_files(tar_bytes):
+            if rel in results and text is not None and hint.search(text):
+                results[rel] = detector.analyze_source(
+                    text, rel, size_bytes=size_bytes,
+                    javascript_sources=javascript_sources, external_exports=exports)
+
+    local_python_modules = {
+        module for rel, result in results.items() if result.language == "python"
+        for module in _python_module_keys(rel)
+    }
+    imported_frameworks = set()
+    framework_call_counts = {}
+
+    files_scanned = len(results)
+    for rel, result in results.items():
         # `files_scanned` already counted this file above -- a parse error
         # (e.g. unresolved git-conflict markers, see test_counts.py) does
         # NOT skip a file, it just leaves it with empty findings, so
@@ -165,22 +277,39 @@ def scan_tarball(detector, tar_bytes):
         # any code/report already relying on it.
         if result.parse_error:
             files_with_parse_errors += 1
+        is_python = result.language == "python"
 
         for f in result.findings:
-            findings.append({**f, "file": rel})
+            f = {**f, "file": rel}
+            if "store" in f:
+                f["store"] = _store_id(rel, f["store"])
+            findings.append(f)
 
         for a in result.named_agents:
             agent_instances.append({"name": a["name"], "tools_bound": a["tools_bound"]})
         for c in result.custom_agents:
             custom_agent_instances.append(c)
         for s in result.named_stores:
-            store_instances.append({"variable": s["variable"]})
+            sid = _store_id(rel, (s["line"], s["col"]))
+            stores[sid] = {
+                "id": sid, "variable": s["variable"], "framework": s["framework"],
+                "file": rel, "line": s["line"], "n_writes": 0, "n_reads": 0, "agents": set(),
+            }
         for link in result.store_agent_links:
-            store_agent_links.append(link)
+            store_agent_links.append({**link, "store_id": _store_id(rel, link.get("store_ref"))})
         for w in result.write_sites:
-            write_sites.append(w)
+            write_sites.append({**w, "store_id": _store_id(rel, w.get("store"))})
         for r in result.read_sites:
-            read_sites.append(r)
+            read_sites.append({**r, "store_id": _store_id(rel, r.get("store"))})
+
+        for imp in result.imports:
+            if imp["framework"] and not (is_python and _is_local_python_import(imp["canonical"], local_python_modules)):
+                imported_frameworks.add(imp["framework"])
+        for framework, by_module in result.framework_uses.items():
+            n = sum(count for module, count in by_module.items()
+                    if not (is_python and _is_local_python_import(module, local_python_modules)))
+            if n:
+                framework_call_counts[framework] = framework_call_counts.get(framework, 0) + n
 
     findings.sort(key=lambda f: (f["file"], f["line"]))
 
@@ -233,22 +362,31 @@ def scan_tarball(detector, tar_bytes):
         ev["name"] for ev in tools_evidence if ev["source"] == "confirmed_tool_definition"
     )
     n_tools = len(tools_bound_all)
-    has_rag = len(store_instances) > 0
+    has_rag = len(stores) > 0
 
-    store_to_agents = {}
+    # Everything below is keyed by store INSTANCE (its "file:line:col" id), not
+    # by variable name: two unrelated `kb` variables in different files are
+    # two stores, and one store imported into three files is still one.
     for link in store_agent_links:
-        store_to_agents.setdefault(link["store"], set()).add(link["agent"])
-    shared_across_agents = any(len(agents) >= 2 for agents in store_to_agents.values())
+        if link["store_id"] in stores and link["agent"]:
+            stores[link["store_id"]]["agents"].add(link["agent"])
+    for sites, counter in ((write_sites, "n_writes"), (read_sites, "n_reads")):
+        for site in sites:
+            if site["store_id"] in stores:
+                stores[site["store_id"]][counter] += 1
+    shared_across_agents = any(len(s["agents"]) >= 2 for s in stores.values())
 
-    rag_writers = sorted({
-        agent for w in write_sites
-        for agent in store_to_agents.get(w.get("variable"), [])
-    })
-    rag_readers = sorted({
-        agent for r in read_sites
-        for agent in store_to_agents.get(r.get("variable"), [])
-    })
+    rag_writers = sorted({agent for s in stores.values() if s["n_writes"] for agent in s["agents"]})
+    rag_readers = sorted({agent for s in stores.values() if s["n_reads"] for agent in s["agents"]})
     unsanitized_writes = any(w["unsanitized"] for w in write_sites)
+
+    # A store that is written but never read is a log/sink rather than
+    # retrieval memory; `role` keeps the two apart.
+    store_evidence = [{
+        **s, "agents": sorted(s["agents"]),
+        "role": ("read_write" if s["n_writes"] and s["n_reads"] else
+                 "write_only" if s["n_writes"] else "read_only" if s["n_reads"] else "unused"),
+    } for s in stores.values()]
 
     # n_custom_agents: hand-rolled agents (no tracked framework) confirmed
     # only via real tool-calling evidence. NOT guaranteed disjoint from
@@ -280,6 +418,13 @@ def scan_tarball(detector, tar_bytes):
         "n_tool_definition_markers": len(tool_definition_evidence),
         "tool_definition_evidence": tool_definition_evidence,
         "has_rag": has_rag,
+        "n_stores": len(stores),
+        "store_evidence": store_evidence,
+        "store_frameworks": sorted({s["framework"] for s in stores.values()}),
+        "n_stores_written": sum(1 for s in stores.values() if s["n_writes"]),
+        "n_stores_read": sum(1 for s in stores.values() if s["n_reads"]),
+        "rag_write_frameworks": sorted({w["framework"] for w in write_sites}),
+        "rag_read_frameworks": sorted({r["framework"] for r in read_sites}),
         "shared_across_agents": shared_across_agents,
         "rag_writers": rag_writers,
         "rag_readers": rag_readers,
@@ -300,12 +445,16 @@ def scan_tarball(detector, tar_bytes):
         "radar_summary": radar_summary,
         "findings": findings,
         "_detected_frameworks": sorted(detected_frameworks),  # consumed by build_output_record, not meant as final output
+        "_imported_frameworks": sorted(imported_frameworks),  # same
+        "_framework_call_counts": framework_call_counts,  # same
     }
 
 
 def build_output_record(entry, scan_result, status, error=None):
     declared = {f["name"] for f in entry.get("frameworks", [])}
     detected = set(scan_result.pop("_detected_frameworks", [])) if scan_result else set()
+    imported = set(scan_result.pop("_imported_frameworks", [])) if scan_result else set()
+    call_counts = scan_result.pop("_framework_call_counts", {}) if scan_result else {}
     record = {
         "repo_name": entry.get("name"),
         "repo_url": entry.get("url"),
@@ -326,6 +475,20 @@ def build_output_record(entry, scan_result, status, error=None):
             "agrees": sorted(declared & detected),
             "declared_only": sorted(declared - detected),
             "detected_only": sorted(detected - declared),
+        }
+        # Stricter version of the crawler's dependency filter: declaring or
+        # importing a framework is not enough, application code (tests,
+        # examples and vendored directories are never scanned) has to call
+        # something imported from it. `instantiated` is exactly that: at
+        # least one call, decorator or subclass whose name traces back to
+        # an import of the framework's package.
+        instantiated = set(call_counts)
+        record["framework_usage"] = {
+            "instantiated": sorted(instantiated),
+            "imported_only": sorted(imported - instantiated),
+            "declared_only": sorted(declared - imported - instantiated),
+            "call_counts": dict(sorted(call_counts.items())),
+            "passes_instantiation_filter": bool(instantiated),
         }
     return record
 

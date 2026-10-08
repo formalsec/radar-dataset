@@ -28,9 +28,11 @@ shape and behavior. New capabilities:
    function and checked against TAINT_SOURCE_MARKERS. This is a heuristic,
    NOT real dataflow propagation -- documented deliberately.
 
-Everything above is single-file, single-hop. Cross-file store/agent linking
-is aggregated at the repo level in scan_api.py / scan_local.py, using the
-per-file named_agents/named_stores/store_agent_links this file now emits.
+Everything above is single-hop. A store or agent imported by name from
+another file resolves through `external_exports` (built by scan_api from a
+first pass over the repo); stores are identified per instance so a
+write/read names the store it targets. JS/TS goes through the same steps in
+_reduce_javascript_ast.
 """
 
 import ast
@@ -151,6 +153,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import js_ast
 from .pattern_index import MASTER_SET
 
 CREATION_CATEGORIES = ("agent_creation", "rag_creation")
@@ -163,6 +166,8 @@ EXTENSION_LANGUAGE_MAP = {
     ".cjs": "javascript",
     ".ts": "javascript",
     ".tsx": "javascript",
+    ".mts": "javascript",
+    ".cts": "javascript",
 }
 
 DEFAULT_MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024  # Mudar
@@ -174,7 +179,23 @@ _JS_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 # variable, links that store to the agent being constructed. Not exhaustive
 # -- covers the conventions actually seen across LangChain/CrewAI/AutoGen/
 # LlamaIndex-style constructors. TODO: extend from real examples.
-_STORE_LINK_KWARGS = ("memory", "vector_store", "vectorstore", "retriever", "knowledge", "store")
+_STORE_LINK_KWARGS = ("memory", "vector_store", "vectorstore", "vectorStore", "retriever", "knowledge", "store")
+
+# Accessors that return a handle ON the same store rather than a new one:
+# `collection = client.get_or_create_collection("docs")`, `index =
+# pc.Index("docs")`. The variable they are assigned to inherits the store,
+# so `collection.add(...)` is traced back to `client`. An explicit
+# allow-list, NOT "any method on a store": `results = collection.query(q)`
+# must not turn `results` into a store (its `.get(` would count as a read).
+_STORE_HANDLE_METHODS = {
+    "get_or_create_collection", "get_collection", "create_collection",
+    "getOrCreateCollection", "getCollection", "createCollection",
+    "Index", "index", "namespace", "collection",
+    "as_retriever", "asRetriever", "as_query_engine", "asQueryEngine",
+}
+# Weaviate's handle accessor is `client.collections.get("Docs")` -- a plain
+# `.get(` everywhere else, so it only counts under `.collections`.
+_STORE_HANDLE_NAMESPACE_METHODS = {"collections": {"get", "create", "use"}}
 
 # Modules whose own `.compile(` method has nothing to do with an agent
 # graph (re.compile, py_compile.compile, ...) but share the generic
@@ -190,6 +211,10 @@ TAINT_SOURCE_MARKERS = [
     "user_input", "external", "web_content",
 ]
 SANITIZER_KEYWORDS = ["validate", "sanitize", "clean", "escape", "schema", "pydantic"]
+# JS/TS spellings of the same two lists. Markers are compared with
+# underscores removed, so `toolResult` matches "tool_result".
+_JS_TAINT_SOURCE_MARKERS = TAINT_SOURCE_MARKERS + ["req.body", "req.query", "req.params"]
+_JS_SANITIZER_KEYWORDS = SANITIZER_KEYWORDS + ["zod", "safeparse", "dompurify"]
 
 
 @dataclass
@@ -214,6 +239,17 @@ class FileResult:
     tool_definition_markers: list = field(default_factory=list)  # Unconfirmed definition markers
     custom_agents: list = field(default_factory=list)  # confirmed hand-rolled agents, see _group_custom_agents
     confirmed_tool_definitions: list = field(default_factory=list)  # Confirmed Python tool definitions
+    # framework -> {imported module: n}, one per call/decorator/base class
+    # whose own name traces back to an import of that framework. This is
+    # "the framework is actually used", as opposed to `imports` ("it is
+    # imported"); scan_api's framework_usage is built from the two.
+    framework_uses: dict = field(default_factory=dict)
+    # Every variable that holds a store or agent in this file, handles and
+    # aliases included: store_vars[var] = (framework, creation (line, col)
+    # or "file:line:col" id), agent_vars[var] = framework. What another file can
+    # import by name -- see scan_api._collect_exports.
+    store_vars: dict = field(default_factory=dict)
+    agent_vars: dict = field(default_factory=dict)
 
 
 class CompiledCategory:
@@ -326,13 +362,15 @@ class PatternDetector:
                        javascript_sources=None):
         """
         external_exports: optional {"stores": {module: {var: framework}},
-        "agents": {module: {var: framework}}} collected from a FIRST pass
-        over the repo, letting this file resolve a store OR agent it
-        imported from another file (`from store import kb`,
-        `from agents import researcher`) -- without it, a write/read/call
+        "agents": {module: {var: framework}}, "store_ids": {module: {var:
+        "file:line:col"}}} collected from a FIRST pass over the repo, letting
+        this file resolve a store OR agent it imported from another file
+        (`from store import kb`, `from agents import researcher`,
+        `import { kb } from "./store"`) -- without it, a write/read/call
         performed in a different file from where the object was created is
         invisible, which systematically under-counts rag_writers,
-        rag_readers and agent calls in modular codebases.
+        rag_readers and agent calls in modular codebases. `module` is a
+        dotted path for Python and a repo-relative file path for JS/TS.
         See scan_api._collect_exports for how it's built.
         """
         language = EXTENSION_LANGUAGE_MAP.get(Path(filename).suffix.lower())
@@ -354,16 +392,29 @@ class PatternDetector:
             (reduced_text, parse_error, named_agents, named_stores,
              store_links, tainted_writes, write_sites, read_sites, call_sites, imports,
              llm_tool_calls, tool_use_markers, agent_markers,
-             confirmed_tool_definitions) = reduced
+             confirmed_tool_definitions, framework_uses, store_vars, agent_vars) = reduced
         else:
             reduced_text, parse_error = _reduce_javascript(source), None
             named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], []
-            # No AST reduction for JS/TS -- plain-text detectors only.
-            named_agents = _detect_js_named_agents(
-                source_lines, self._agent_creation_category,
-                self._framework_languages.get("agent_creation", {}),
-                filename, javascript_sources,
-            )
+            framework_uses, store_vars, agent_vars = {}, {}, {}
+            if js_ast.AVAILABLE:
+                (parse_error, named_agents, named_stores, imports, store_links,
+                 write_sites, read_sites, call_sites, framework_uses,
+                 store_vars, agent_vars) = _reduce_javascript_ast(
+                    source, filename, self._agent_creation_category,
+                    self._rag_creation_category, self._framework_languages,
+                    javascript_sources, self._rag_writes_category,
+                    self._rag_reads_category, self._agent_calls_category,
+                    external_exports,
+                )
+                tainted_writes = [w for w in write_sites if w["unsanitized"]]
+            else:
+                # Token-based fallback when tree-sitter isn't installed.
+                named_agents = _detect_js_named_agents(
+                    source_lines, self._agent_creation_category,
+                    self._framework_languages.get("agent_creation", {}),
+                    filename, javascript_sources,
+                )
             llm_tool_calls = _detect_bind_tools_calls(source_lines)
             tool_use_markers = _detect_tool_use_markers(source_lines)
             agent_markers = _detect_agent_markers(source_lines)
@@ -383,6 +434,7 @@ class PatternDetector:
             tool_definition_markers=tool_definition_markers,
             custom_agents=_group_custom_agents(llm_tool_calls),
             confirmed_tool_definitions=confirmed_tool_definitions,
+            framework_uses=framework_uses, store_vars=store_vars, agent_vars=agent_vars,
         )
 
         # ONE flat list, same shape for everything: what was found, what
@@ -414,12 +466,12 @@ class PatternDetector:
             findings.append({
                 "type": "write", "name": w["variable"], "framework": w.get("framework"),
                 "matched": f".{w['method']}(", "line": w["line"],
-                "unsanitized": w.get("unsanitized"),
+                "unsanitized": w.get("unsanitized"), "store": w.get("store"),
             })
         for r in read_sites:
             findings.append({
                 "type": "read", "name": r["variable"], "framework": r.get("framework"),
-                "matched": f".{r['method']}(", "line": r["line"],
+                "matched": f".{r['method']}(", "line": r["line"], "store": r.get("store"),
             })
         # tool_use, from two sources, both located by line so they can be
         # spot-checked the same way as everything else:
@@ -486,7 +538,7 @@ class PatternDetector:
         # a shared generic verb like ".add(" from incrementing every
         # framework that happens to list it (e.g. Chroma AND Mem0 both
         # getting +1 for one real Chroma call).
-        if language == "python":
+        if language == "python" or js_ast.AVAILABLE:
             for source_list, cat_name in (
                 (named_agents, "agent_creation"), (named_stores, "rag_creation"),
                 (call_sites, "agent_calls"), (write_sites, "rag_writes"), (read_sites, "rag_reads"),
@@ -505,14 +557,12 @@ class PatternDetector:
         else:
             dedup_done = set()
 
-        # Everything else (a2a_interaction for Python; ALL categories for
-        # JS/TS, which has no attribution machinery yet) keeps the original
-        # independent-sweep counting. KNOWN LIMITATION, disclosed not
-        # hidden: a2a_interaction and JS/TS results can still double-count
-        # a pattern shared by multiple frameworks, same root cause as
-        # before -- fixing that needs the same single-attribution treatment
-        # extended to handoffs and to a JS/TS equivalent of named_agents/
-        # named_stores, neither of which exist yet.
+        # Everything else (a2a_interaction and tool_definition; ALL
+        # categories for JS/TS when tree-sitter isn't installed) keeps the
+        # original independent-sweep counting. KNOWN LIMITATION, disclosed
+        # not hidden: those can still double-count a pattern shared by
+        # multiple frameworks -- fixing that needs the same
+        # single-attribution treatment extended to handoffs.
         for cat_name, compiled_cat in self.categories.items():
             if cat_name in dedup_done:
                 continue
@@ -746,6 +796,97 @@ def _wrapping_call_framework(call_node, var_name, prelim_framework_by_var):
     return prelim_framework_by_var.get(receiver)
 
 
+def _is_store_handle_accessor(func_node):
+    """`<x>.get_collection(`, `<x>.Index(`, `<x>.collections.get(` -- see
+    _STORE_HANDLE_METHODS."""
+    if not isinstance(func_node, ast.Attribute):
+        return False
+    if func_node.attr in _STORE_HANDLE_METHODS:
+        return True
+    return (isinstance(func_node.value, ast.Attribute)
+            and func_node.attr in _STORE_HANDLE_NAMESPACE_METHODS.get(func_node.value.attr, ()))
+
+
+def _resolve_store_receiver(func_node):
+    """_resolve_identity for the receiver of `recv.method(...)`, seeing
+    through chained handle accessors: `client.get_collection("x").add(` is
+    a write on `client`."""
+    node = func_node.value
+    while True:
+        if isinstance(node, ast.Await):
+            node = node.value
+        elif isinstance(node, ast.Call) and _is_store_handle_accessor(node.func):
+            node = node.func.value
+        else:
+            break
+    return _resolve_identity(node)
+
+
+def _resolve_store_handles(tree, *store_dicts):
+    """`collection = client.get_collection("x")`: `collection` inherits
+    whatever `client` resolved to. Same fixed-point shape as
+    _resolve_variable_aliases, for handle accessors instead of bare names."""
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                if len(node.targets) != 1:
+                    continue
+                target_node, value_node = node.targets[0], node.value
+            elif isinstance(node, ast.AnnAssign):
+                target_node, value_node = node.target, node.value
+            else:
+                continue
+            if isinstance(value_node, ast.Await):
+                value_node = value_node.value
+            if not (isinstance(value_node, ast.Call) and _is_store_handle_accessor(value_node.func)):
+                continue
+            target = _resolve_identity(target_node)
+            source_var = _resolve_store_receiver(value_node.func)
+            if target is None or source_var is None or target == source_var:
+                continue
+            for d in store_dicts:
+                if source_var in d and target not in d:
+                    d[target] = d[source_var]
+                    changed = True
+
+
+def _store_at(variable, line, store_framework_by_var, store_ref_by_var, store_history):
+    """-> (framework, ref) of the store `variable` holds at `line`. A name
+    assigned a store more than once in a file (`client = chromadb.Client()`
+    in two functions, or `kb = QdrantClient()` later rebound to
+    `kb = Pinecone()`) resolves to the closest creation above the use, for
+    BOTH the framework and the instance -- not to whichever came last.
+    store_history[variable] is [((line, col), framework), ...]."""
+    creations = store_history.get(variable, ())
+    if len(creations) > 1:
+        ref, framework = max((c for c in creations if c[0][0] <= line), default=min(creations))
+        return framework, ref
+    return store_framework_by_var.get(variable), store_ref_by_var.get(variable)
+
+
+def _usage_framework(func_node, import_aliases):
+    """-> (framework, imported module) for the import a call, decorator or
+    base class traces back to, or (None, None). Broader than
+    _frameworks_for_call_identifier on purpose: this answers "is the
+    framework used at all", so any depth of attribute chain counts
+    (`openai.chat.completions.create(`)."""
+    node = func_node
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None, None
+    canonical = import_aliases.get(node.id)
+    if canonical is None:
+        return None, None
+    framework = _resolve_module_framework(canonical)
+    # `google` alone is every Google package (google.cloud, google.auth, ...).
+    if framework == "Google GenAI" and not canonical.startswith(("google.genai", "google.generativeai")):
+        return None, None
+    return framework, canonical
+
+
 def _tool_element_identifier(elt, import_aliases=None):
     """Best-effort identifier for one element of a `tools=[...]` list: a bare
     name (`search_tool`) or a tool-factory call (`get_search_ddg_tool()`) --
@@ -889,10 +1030,10 @@ def _find_starred_tools_value(call_node, assigns_by_func_and_name, func_ctx):
     return None
 
 
-def _has_sanitizer_nearby(source_lines, line_no, window=5):
+def _has_sanitizer_nearby(source_lines, line_no, window=5, keywords=SANITIZER_KEYWORDS):
     start = max(0, line_no - window)
     context = " ".join(source_lines[start:line_no]).lower()
-    return any(kw in context for kw in SANITIZER_KEYWORDS)
+    return any(kw in context for kw in keywords)
 
 
 def _walk_with_function_context(node, current_function=None):
@@ -1379,6 +1520,11 @@ def _js_tools(expression, tokens, filename, sources, seen=frozenset()):
         return []
     seen = seen | {key}
     is_call = len(expression) > 1 and expression[1] == "("
+    # Only a bare name or one plain call can be followed. Anything else
+    # (`config.tools ?? defaults()`, `off ? undefined : tools`) can't be
+    # resolved statically, and its first identifier is not a tool name.
+    if len(expression) > 1 and not (is_call and len(_js_group(expression, 1)) + 3 == len(expression)):
+        return []
     for i, token in enumerate(tokens):
         if token in ("const", "let", "var") and tokens[i + 1:i + 3] == [name, "="]:
             value = next(_js_parts(tokens[i + 3:]))
@@ -2241,14 +2387,14 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     Returns (reduced_text, parse_error, named_agents, named_stores,
     store_agent_links, tainted_writes, write_sites, read_sites, call_sites,
     imports, llm_tool_calls, tool_use_markers, agent_markers,
-    confirmed_tool_definitions).
+    confirmed_tool_definitions, framework_uses, store_vars, agent_vars).
     """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as e:
-        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], [], []
+        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], [], [], {}, {}, {}
     except RecursionError as e:
-        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], [], []
+        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], [], [], {}, {}, {}
 
     source_lines = source.splitlines()
     import_aliases = _build_import_aliases(tree)
@@ -2284,6 +2430,13 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     confirmed_tool_definitions = []
     assign_target_for_call = {}
     assigns_by_func_and_name = {}  # (func_ctx, var_name) -> most recent Assign.value node
+    framework_uses = {}
+
+    def record_use(func_node):
+        framework, module = _usage_framework(func_node, import_aliases)
+        if framework:
+            by_module = framework_uses.setdefault(framework, {})
+            by_module[module] = by_module.get(module, 0) + 1
 
     # Pass 1: imports/decorators/literals/calls -> reduced text, plus collect
     # every simple Assign so the taint check can look up "most recent source"
@@ -2305,6 +2458,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 continue
             call_text = f"{func_repr}("
             lines.append(call_text)
+            record_use(callee)
 
             # Agent creation. Role is decided by pattern shape (does this
             # call look like an agent-creation call at all, across any
@@ -2363,12 +2517,19 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 store_framework = _match_constructor_text(call_text, rag_creation_category, call_frameworks)
                 if store_framework is None and canonical_text:
                     store_framework = _match_constructor_text(canonical_text, rag_creation_category, call_frameworks)
+            # "Generic Client" is any `Client(`: only a store when the name
+            # comes from a tracked store package, same rule as the JS pass.
+            # Otherwise it is genai.Client(), notion Client(), httpx.Client().
+            if store_framework == "Generic Client" and not (
+                    call_frameworks & set(rag_creation_category.frameworks)):
+                store_framework = None
             if store_framework is None and isinstance(callee, ast.Name):
                 store_framework = extra_store_classes.get(callee.id)
             if store_framework is not None:
                 pending_store_calls[id(node)] = {
                     "framework": store_framework,
                     "line": node.lineno,
+                    "col": node.col_offset + 1,
                     "call_node": node,
                     "matched_call": call_text,
                 }
@@ -2422,6 +2583,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     lines.append(f"@{ast.unparse(dec)}")
                 except Exception:
                     continue
+                if not isinstance(dec, ast.Call):  # a decorator call is already counted as a Call
+                    record_use(dec)
                 if (tool_definition_category is not None
                         and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
                     dec_func = dec.func if isinstance(dec, ast.Call) else dec
@@ -2440,6 +2603,9 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                             "line": getattr(dec, "lineno", node.lineno),
                             "matched_call": dec_text,
                         })
+            if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    record_use(base)
             if tool_definition_category is not None and isinstance(node, ast.ClassDef):
                 # `class X(BaseTool): name = "x"` -- base confirmed by import.
                 tool_name = next((
@@ -2522,6 +2688,13 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     # whenever a shared verb like ".add(" matched, regardless of which
     # actual store the call was on).
     store_framework_by_var = {}
+    # variable -> WHICH store it is: the creation's (line, column) in this
+    # file, or a "file:line:col" id for a store imported from another file.
+    # This is what lets a write/read name the specific store instance it
+    # targets.
+    store_ref_by_var = {}
+    store_history = {}
+    wrapped_store_receivers = {}
     prelim_store_framework = {
         assign_target_for_call[cid]: e["framework"]
         for cid, e in pending_store_calls.items() if assign_target_for_call.get(cid)
@@ -2533,13 +2706,19 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
         if wrapped_framework is not None:
             if var_name:
                 store_framework_by_var[var_name] = wrapped_framework
+                wrapped_store_receivers[var_name] = _resolve_identity(entry["call_node"].func)
             continue  # same store as the receiver -- don't count a second one
         if var_name:
             store_framework_by_var[var_name] = entry["framework"]
+            store_ref_by_var[var_name] = (entry["line"], entry["col"])
+            store_history.setdefault(var_name, []).append(((entry["line"], entry["col"]), entry["framework"]))
         named_stores.append({
             "variable": var_name, "framework": entry["framework"], "line": entry["line"],
-            "matched_call": entry["matched_call"],
+            "col": entry["col"], "matched_call": entry["matched_call"],
         })
+    for var_name, receiver in wrapped_store_receivers.items():
+        if receiver in store_ref_by_var:
+            store_ref_by_var.setdefault(var_name, store_ref_by_var[receiver])
 
     for call_id, entry in pending_tool_def_calls.items():
         confirmed_tool_definitions.append({
@@ -2597,6 +2776,9 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 framework = exports_for_kind.get(module_path, {}).get(imported_name)
                 if framework:
                     table.setdefault(local_name, framework)
+                    store_id = (external_exports.get("store_ids") or {}).get(module_path, {}).get(imported_name)
+                    if kind == "stores" and store_id:
+                        store_ref_by_var.setdefault(local_name, store_id)
 
     # Rebuild known_store_vars AFTER cross-file resolution, so a store
     # imported from another file also counts as "a known store" when
@@ -2604,8 +2786,6 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     # linked to an imported store formed no link at all, leaving
     # rag_writers/rag_readers empty whenever the store, the agent and the
     # write lived in three different files. Confirmed by testing.
-    known_store_vars = {v for v in store_framework_by_var}
-
     llm_client_framework_by_var = {}
     for call_id, entry in pending_llm_clients.items():
         var_name = assign_target_for_call.get(call_id)
@@ -2622,7 +2802,15 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     # b = a`) resolve regardless of source order. File-wide, not
     # function-scoped -- same simplification already true of the
     # underlying attribution dicts themselves.
-    _resolve_variable_aliases(tree, store_framework_by_var, agent_framework_by_var, llm_client_framework_by_var)
+    _resolve_variable_aliases(tree, store_framework_by_var, store_ref_by_var,
+                              agent_framework_by_var, llm_client_framework_by_var)
+    # Handles on a store (`collection = client.get_collection(...)`), then
+    # aliases once more so `c = collection` after a handle also resolves.
+    _resolve_store_handles(tree, store_framework_by_var, store_ref_by_var)
+    _resolve_variable_aliases(tree, store_framework_by_var, store_ref_by_var)
+    # Built after the handle pass on purpose: `Agent(retriever=retriever)`
+    # with `retriever = kb.as_retriever()` links the agent to `kb`.
+    known_store_vars = {v for v in store_framework_by_var}
 
     # store_agent_links: direct kwarg-passing at agent-construction time,
     # e.g. Agent(memory=kb) where `kb` is a known store variable.
@@ -2632,6 +2820,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
         if linked_store is not None:
             store_agent_links.append({
                 "store": linked_store,
+                "store_ref": _store_at(linked_store, entry["line"], store_framework_by_var,
+                                       store_ref_by_var, store_history)[1],
                 "agent": entry["name"] or agent_var_by_call_id.get(call_id),
                 "line": entry["line"],
             })
@@ -2656,9 +2846,10 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             method_text = f".{node.func.attr}("
             if _match_constructor_text(method_text, rag_writes_category, require_confirmation=False) is None:
                 continue
-            receiver = _resolve_identity(node.func)
-            framework = store_framework_by_var.get(receiver)
-            if framework is None:
+            receiver = _resolve_store_receiver(node.func)
+            framework, store_ref = _store_at(receiver, node.lineno, store_framework_by_var,
+                                             store_ref_by_var, store_history)
+            if framework is None or _is_store_handle_accessor(node.func):
                 continue
             # NB: named `taint_source`, NOT `source` -- an earlier version
             # used `source` here, which silently shadowed the function's
@@ -2669,7 +2860,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             sanitized_nearby = _has_sanitizer_nearby(source_lines, node.lineno) if tainted else False
             write_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": framework,
+                "framework": framework, "store": store_ref,
                 "tainted": tainted, "taint_source": taint_source,
                 "sanitizer_nearby": sanitized_nearby,
                 "unsanitized": tainted and not sanitized_nearby,
@@ -2745,13 +2936,17 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             method_text = f".{node.func.attr}("
             if _match_constructor_text(method_text, rag_reads_category, require_confirmation=False) is None:
                 continue
-            receiver = _resolve_identity(node.func)
-            framework = store_framework_by_var.get(receiver)
-            if framework is None:
+            receiver = _resolve_store_receiver(node.func)
+            framework, store_ref = _store_at(receiver, node.lineno, store_framework_by_var,
+                                             store_ref_by_var, store_history)
+            # `.as_retriever(` is both a handle accessor and a read pattern
+            # (wiring a retriever IS the read); `collections.get(` is not.
+            if framework is None or (_is_store_handle_accessor(node.func)
+                                     and node.func.attr not in _STORE_HANDLE_METHODS):
                 continue
             read_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": framework,
+                "framework": framework, "store": store_ref,
             })
 
     # call_sites: same confirmed-framework-only filter, resolved against
@@ -2795,13 +2990,647 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
 
     return ("\n".join(lines), None, named_agents, named_stores,
             store_agent_links, tainted_writes, write_sites, read_sites, call_sites, imports,
-            llm_tool_calls, tool_use_markers, agent_markers, confirmed_tool_definitions)
+            llm_tool_calls, tool_use_markers, agent_markers, confirmed_tool_definitions,
+            framework_uses,
+            {var: (fw, store_ref_by_var.get(var)) for var, fw in store_framework_by_var.items()},
+            dict(agent_framework_by_var))
 
 
 def _reduce_javascript(source):
     text = _JS_BLOCK_COMMENT_RE.sub(" ", source)
     text = _JS_LINE_COMMENT_RE.sub(" ", text)
     return text
+
+
+# ---------------------------------------------------------------------- #
+# JS/TS: tree-sitter reduction (parsing/imports live in js_ast.py).
+# Mirrors _reduce_python: named_agents, named_stores and imports with the
+# same per-identifier import confirmation, then call/write/read sites and
+# store links attributed through the variable they are made on, the same
+# one-hop taint check on writes, and cross-file stores/agents via
+# external_exports.
+# ---------------------------------------------------------------------- #
+
+_JS_HTTP_AGENT_MODULES = {"undici", "http", "https", "node:http", "node:https"}
+# Argument identifiers that mark an otherwise-unresolved `new Agent(...)`
+# as an LLM agent rather than some other kind of Agent class.
+_JS_CUSTOM_AGENT_KEYS = {
+    "model", "modelId", "tools", "systemPrompt", "system", "instructions",
+    "messages", "provider", "providerId", "apiKey",
+}
+
+
+def _js_callee_text(node):
+    """`a.b.c` for an identifier/member chain; anything else in the chain
+    becomes `_`, so argument text never leaks into pattern matching."""
+    node = js_ast.unwrap(node)
+    if node is None:
+        return "_"
+    if node.type in ("identifier", "this", "super"):
+        return js_ast.text(node)
+    if node.type == "member_expression":
+        prop = node.child_by_field_name("property")
+        return f"{_js_callee_text(node.child_by_field_name('object'))}.{js_ast.text(prop)}"
+    return "_"
+
+
+def _js_identity(node):
+    """JS counterpart of _resolve_identity: `kb` -> "kb", `this.kb.x` ->
+    "this.kb", `client.chat.completions` -> "client"."""
+    node = js_ast.unwrap(node)
+    chain = []
+    while node is not None and node.type == "member_expression":
+        chain.append(js_ast.text(node.child_by_field_name("property")))
+        node = js_ast.unwrap(node.child_by_field_name("object"))
+    if node is None:
+        return None
+    if node.type == "this" and chain:
+        return f"this.{chain[-1]}"
+    if node.type == "identifier":
+        return js_ast.text(node)
+    return None
+
+
+def _js_callee_binding(callee, aliases, shadows):
+    """-> (framework or None, export name or None) for the import THIS
+    callee traces back to -- the JS equivalent of
+    _frameworks_for_call_identifier. `Agent(` resolves through its own
+    import; `ns.Agent(` through the namespace import of `ns`."""
+    callee = js_ast.unwrap(callee)
+    if callee is None:
+        return None, None
+    if callee.type == "identifier":
+        binding = js_ast.visible_binding(callee, aliases, shadows)
+        if binding is None:
+            return None, None
+        export = binding.export if binding.export not in (None, "default") else js_ast.text(callee)
+    elif callee.type == "member_expression":
+        root = js_ast.unwrap(callee.child_by_field_name("object"))
+        while root is not None and root.type == "member_expression":
+            root = js_ast.unwrap(root.child_by_field_name("object"))
+        if root is None or root.type != "identifier":
+            return None, None
+        binding = js_ast.visible_binding(root, aliases, shadows)
+        if binding is None:
+            return None, None
+        export = js_ast.text(callee.child_by_field_name("property"))
+    else:
+        return None, None
+    framework = js_ast.package_framework(binding.module)
+    # Ordinary function names (query, agentLoop, ...) only count when they
+    # are the SDK's actual agent entry points, not any other export.
+    if framework in _JS_AGENT_EXPORTS and export not in _JS_AGENT_EXPORTS[framework]:
+        return None, export
+    return framework, export
+
+
+def _js_assign_target(call_node):
+    """The variable a creation is bound to: `const a = new X()`,
+    `this.a = new X()`, class field `a = new X()` (-> "this.a"). A creation
+    at the head of a builder chain is bound to whatever the whole chain is
+    assigned to: `const g = new StateGraph(S).addNode(..).addEdge(..)`."""
+    def chained(child, parent):
+        return ((parent.type == "member_expression"
+                 and js_ast.key(parent.child_by_field_name("object")) == js_ast.key(child))
+                or (parent.type == "call_expression"
+                    and js_ast.key(parent.child_by_field_name("function")) == js_ast.key(child)))
+
+    child, parent = call_node, call_node.parent
+    while parent is not None and (parent.type in js_ast._TRANSPARENT or chained(child, parent)):
+        child, parent = parent, parent.parent
+    if parent is None:
+        return None
+    if parent.type == "variable_declarator" and js_ast.key(parent.child_by_field_name("value")) == js_ast.key(child):
+        name = parent.child_by_field_name("name")
+        return js_ast.text(name) if name is not None and name.type == "identifier" else None
+    if parent.type == "assignment_expression" and js_ast.key(parent.child_by_field_name("right")) == js_ast.key(child):
+        return _js_identity(parent.child_by_field_name("left"))
+    if parent.type in ("public_field_definition", "field_definition"):
+        name = parent.child_by_field_name("name") or parent.child_by_field_name("property")
+        return f"this.{js_ast.text(name)}" if name is not None else None
+    return None
+
+
+def _js_options_object(call_node):
+    args = call_node.child_by_field_name("arguments")
+    if args is None or not args.named_children:
+        return None
+    first = js_ast.unwrap(args.named_children[0])
+    return first if first is not None and first.type == "object" else None
+
+
+def _js_object_property(obj, name):
+    """Value node of `name: value` or `{ name }` shorthand in an object literal."""
+    if obj is None:
+        return None
+    for prop in obj.named_children:
+        if prop.type == "pair":
+            k = prop.child_by_field_name("key")
+            key_text = js_ast.string_value(k) if k.type == "string" else js_ast.text(k)
+            if key_text == name:
+                return prop.child_by_field_name("value")
+        elif prop.type == "shorthand_property_identifier" and js_ast.text(prop) == name:
+            return prop
+    return None
+
+
+def _js_name_option(call_node):
+    obj = _js_options_object(call_node)
+    for kwarg in _NAME_KWARGS:
+        value = js_ast.string_value(_js_object_property(obj, kwarg))
+        if value:
+            return value
+    return None
+
+
+def _js_wrapped_framework(callee, var_name, prelim_framework_by_var, pending):
+    """JS counterpart of _wrapping_call_framework: `app = graph.compile()`
+    after `graph = new StateGraph()` is the same agent, not a second one.
+    Also covers the builder chain `new StateGraph(S).addNode(..).compile()`,
+    very common in JS, where the receiver is the creation call itself --
+    returned as (framework, key of that creation) so the caller can hand
+    the chain's variable down to it."""
+    callee = js_ast.unwrap(callee)
+    if callee is None or callee.type != "member_expression":
+        return None
+    node = js_ast.unwrap(callee.child_by_field_name("object"))
+    while node is not None:
+        entry = pending.get(js_ast.key(node))
+        if entry is not None:
+            return entry["framework"], js_ast.key(node)
+        if node.type == "call_expression":
+            node = js_ast.unwrap(node.child_by_field_name("function"))
+        elif node.type == "member_expression":
+            node = js_ast.unwrap(node.child_by_field_name("object"))
+        else:
+            break
+    receiver = _js_identity(callee)
+    if receiver is None or receiver == var_name or receiver not in prelim_framework_by_var:
+        return None
+    return prelim_framework_by_var[receiver], None
+
+
+def _js_is_custom_agent(call_node, callee, aliases):
+    """An unresolved `new Agent({...})` configured like an LLM agent (a
+    local class, or a package we don't track). Ported from the token
+    detector: HTTP-client Agents (undici/http) are excluded by import and
+    by their connection options."""
+    if js_ast.text(callee) != "Agent":
+        return False
+    binding = aliases.get("Agent")
+    if binding is not None and binding.module in _JS_HTTP_AGENT_MODULES:
+        return False
+    obj = _js_options_object(call_node)
+    if obj is not None and any(_js_object_property(obj, k) is not None for k in _UNDICI_AGENT_OPTION_KEYS):
+        return False
+    args = call_node.child_by_field_name("arguments")
+    idents = {js_ast.text(n) for n in js_ast.walk(args) if n.type in (
+        "identifier", "property_identifier", "shorthand_property_identifier")}
+    return bool(idents & _JS_CUSTOM_AGENT_KEYS)
+
+
+def _js_is_store_handle_accessor(callee):
+    """JS counterpart of _is_store_handle_accessor."""
+    callee = js_ast.unwrap(callee)
+    if callee is None or callee.type != "member_expression":
+        return False
+    method = js_ast.text(callee.child_by_field_name("property"))
+    if method in _STORE_HANDLE_METHODS:
+        return True
+    obj = js_ast.unwrap(callee.child_by_field_name("object"))
+    return (obj is not None and obj.type == "member_expression"
+            and method in _STORE_HANDLE_NAMESPACE_METHODS.get(
+                js_ast.text(obj.child_by_field_name("property")), ()))
+
+
+def _js_store_receiver(callee):
+    """JS counterpart of _resolve_store_receiver: `pc.index("x").upsert(`
+    is a write on `pc`."""
+    callee = js_ast.unwrap(callee)
+    if callee is None or callee.type != "member_expression":
+        return None
+    node = js_ast.unwrap(callee.child_by_field_name("object"))
+    while node is not None and node.type == "call_expression":
+        func = node.child_by_field_name("function")
+        if not _js_is_store_handle_accessor(func):
+            return None
+        node = js_ast.unwrap(js_ast.unwrap(func).child_by_field_name("object"))
+    return _js_identity(node)
+
+
+def _js_root_identifier(node):
+    """The identifier an `a.b().c` chain starts from, or None (`this`, a
+    literal, a parenthesised expression)."""
+    node = js_ast.unwrap(node)
+    while node is not None and node.type in ("member_expression", "call_expression"):
+        node = js_ast.unwrap(node.child_by_field_name(
+            "object" if node.type == "member_expression" else "function"))
+    return node if node is not None and node.type == "identifier" else None
+
+
+_JS_GRAPH_BUILDER_METHODS = {"addNode", "addEdge", "addConditionalEdges"}
+
+
+def _js_is_graph_compile(callee, graph_vars):
+    """`x.compile()` only counts as an agent graph when `x` is one: a
+    variable a StateGraph was assigned to or `.addNode(` was called on, or
+    a builder chain (`new StateGraph(S).addNode(..).compile()`). Any other
+    `.compile(` in the same file is a template/regex/schema compiler."""
+    callee = js_ast.unwrap(callee)
+    if callee is None or callee.type != "member_expression":
+        return False
+    if _js_identity(callee) in graph_vars:
+        return True
+    node = js_ast.unwrap(callee.child_by_field_name("object"))
+    while node is not None:
+        if node.type == "member_expression":
+            if js_ast.text(node.child_by_field_name("property")) in _JS_GRAPH_BUILDER_METHODS:
+                return True
+            node = js_ast.unwrap(node.child_by_field_name("object"))
+        elif node.type in ("call_expression", "new_expression"):
+            func = node.child_by_field_name("function" if node.type == "call_expression" else "constructor")
+            if _js_callee_text(func).endswith("StateGraph"):
+                return True
+            node = js_ast.unwrap(func)
+        else:
+            break
+    return False
+
+
+def _js_local_module_paths(filename, module):
+    """Repo paths a relative import specifier can resolve to, in the order
+    _js_tools tries them."""
+    target = posixpath.normpath(posixpath.join(posixpath.dirname(filename), module))
+    stem = posixpath.splitext(target)[0]
+    exts = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
+    return ([target] + [stem + e for e in exts] + [target + e for e in exts]
+            + [f"{target}/index{e}" for e in exts])
+
+
+def _js_enclosing_function(node):
+    node = node.parent
+    while node is not None and node.type not in js_ast._FUNCTION_TYPES:
+        node = node.parent
+    return js_ast.key(node) if node is not None else None
+
+
+def _js_write_taint(call_node, assigns_by_func_and_name):
+    """JS counterpart of _is_write_argument_tainted. The dominant JS shape
+    is an options object (`collection.add({ documents: [doc], ids })`), so
+    objects and arrays are unwrapped two levels deep. Same one-hop,
+    same-function lookback, same caveat: a keyword heuristic, not dataflow."""
+    args = call_node.child_by_field_name("arguments")
+    if args is None or not args.named_children:
+        return False, None
+    def flatten(node, depth):
+        node = js_ast.unwrap(node)
+        if node is None:
+            return []
+        if depth and node.type == "array":
+            return [n for e in node.named_children for n in flatten(e, depth - 1)]
+        if depth and node.type == "object":
+            return [n for c in node.named_children
+                    for n in flatten(c.child_by_field_name("value") if c.type == "pair" else c, depth - 1)]
+        return [node]
+
+    # two levels: `{ documents: [doc] }` and `[{ id, values: doc }]`
+    flat = flatten(args.named_children[0], 2)
+    func_ctx = _js_enclosing_function(call_node)
+    markers = [m.replace("_", "") for m in _JS_TAINT_SOURCE_MARKERS]
+    for candidate in flat:
+        if candidate.type in ("identifier", "shorthand_property_identifier"):
+            source_node = assigns_by_func_and_name.get((func_ctx, js_ast.text(candidate)))
+            source_text = js_ast.text(source_node if source_node is not None else candidate)
+        else:
+            source_text = js_ast.text(candidate)
+        lowered = source_text.lower().replace("_", "")
+        for marker, original in zip(markers, _JS_TAINT_SOURCE_MARKERS):
+            if marker in lowered:
+                return True, original
+    return False, None
+
+
+def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creation_category,
+                           framework_languages, javascript_sources=None, rag_writes_category=None,
+                           rag_reads_category=None, agent_calls_category=None, external_exports=None):
+    """-> (parse_error, named_agents, named_stores, imports, store_agent_links,
+    write_sites, read_sites, call_sites, framework_uses, store_vars,
+    agent_vars), each in the same shape _reduce_python emits."""
+    root, parse_error = js_ast.parse(source, filename)
+    aliases = js_ast.build_import_aliases(root)
+    shadows = js_ast.build_shadows(root, aliases)
+    framework_uses = {}
+
+    def record_use(ident):
+        """Count a call/`new`/JSX element whose root name is an import of a
+        tracked package -- see FileResult.framework_uses."""
+        ident = _js_root_identifier(ident)
+        if ident is None:
+            return
+        binding = js_ast.visible_binding(ident, aliases, shadows)
+        framework = js_ast.package_framework(binding.module) if binding else None
+        if framework:
+            by_module = framework_uses.setdefault(framework, {})
+            by_module[binding.module] = by_module.get(binding.module, 0) + 1
+
+    def allowed(framework, category):
+        langs = framework_languages.get(category, {}).get(framework)
+        return framework is not None and (langs is None or "javascript" in langs)
+
+    calls = []
+    graph_vars = set()
+    for node in js_ast.walk(root):
+        if node.type == "call_expression":
+            callee, is_new = node.child_by_field_name("function"), False
+            if callee is None or callee.type == "import" or js_ast.text(callee) == "require":
+                continue
+        elif node.type == "new_expression":
+            callee, is_new = node.child_by_field_name("constructor"), True
+        elif node.type in ("jsx_opening_element", "jsx_self_closing_element"):
+            record_use(js_ast.unwrap(node.child_by_field_name("name")))  # <CopilotKit ...>
+            continue
+        elif node.type == "class_heritage":
+            # `class X extends Base` -- JS puts the expression right here,
+            # TS wraps it in an extends_clause (implements_clause is types).
+            for child in node.named_children:
+                bases = (child.children_by_field_name("value") if child.type == "extends_clause"
+                         else [] if child.type == "implements_clause" else [child])
+                for base in bases:
+                    if base.type != "call_expression":  # a mixin call is already counted as a call
+                        record_use(base)
+            continue
+        elif node.type == "decorator":
+            expr = node.named_children[0] if node.named_children else None
+            if expr is not None and expr.type != "call_expression":
+                record_use(expr)
+            continue
+        else:
+            continue
+        record_use(js_ast.unwrap(callee))
+        callee_text = _js_callee_text(callee)
+        if callee_text.endswith("StateGraph"):
+            graph_vars.add(_js_assign_target(node))
+        elif callee_text.endswith(".addNode"):
+            graph_vars.add(_js_identity(callee))
+        calls.append((node, callee, callee_text, is_new))
+    graph_vars.discard(None)
+
+    store_frameworks = set(rag_creation_category.frameworks) if rag_creation_category else set()
+    pending_agents, pending_stores = {}, {}
+    for node, callee, callee_text, is_new in calls:
+        prefix = "new " if is_new else ""
+        call_text = f"{prefix}{callee_text}("
+        framework, export = _js_callee_binding(callee, aliases, shadows)
+        canonical_text = f"{prefix}{export}(" if export and export != callee_text else None
+
+        def match(category, cat_name):
+            confirmed = {framework} if allowed(framework, cat_name) else set()
+            label = _match_constructor_text(call_text, category, confirmed)
+            if label is None and canonical_text:
+                label = _match_constructor_text(canonical_text, category, confirmed)
+            return label
+
+        agent_framework = match(agent_creation_category, "agent_creation") if agent_creation_category else None
+        if agent_framework == "MCP SDK":
+            agent_framework = None  # new McpServer( is a tool server, not an agent
+        if agent_framework == "Graph Compile" and not _js_is_graph_compile(callee, graph_vars):
+            agent_framework = None  # `.compile(` on something that isn't a graph (regex, templates, ...)
+        if agent_framework is None and is_new and _js_is_custom_agent(node, callee, aliases):
+            agent_framework = "Custom"
+        if agent_framework is not None:
+            pending_agents[js_ast.key(node)] = {
+                "node": node, "callee": callee, "framework": agent_framework,
+                "line": js_ast.line(node), "col": node.start_point[1] + 1, "matched_call": call_text,
+            }
+            continue  # a call site is either an agent or a store, not both
+
+        store_framework = match(rag_creation_category, "rag_creation") if rag_creation_category else None
+        # Generic store labels ("Generic Client" = any `Client(`) are only
+        # trusted in JS when the callee comes from a tracked store package:
+        # `new Client()` is pg/discord/MCP far more often than a vector DB.
+        if (store_framework is not None and store_framework not in store_frameworks
+                and store_framework != "Zep JS" and framework not in store_frameworks):
+            store_framework = None
+        if store_framework is not None:
+            pending_stores[js_ast.key(node)] = {
+                "node": node, "callee": callee, "framework": store_framework,
+                "line": js_ast.line(node), "col": node.start_point[1] + 1, "matched_call": call_text,
+            }
+
+    file_tokens = None
+
+    def tools_bound(call_node):
+        nonlocal file_tokens
+        value = _js_object_property(_js_options_object(call_node), "tools")
+        if value is None:
+            return []
+        if file_tokens is None:
+            file_tokens = [m.group() for m in _js_tokens(source)]
+        expression = [m.group() for m in _js_tokens(js_ast.text(value))]
+        return _js_tools(expression, file_tokens, filename, javascript_sources)
+
+    def resolve(pending):
+        """Assignment targets + wrap filtering, as in _reduce_python. Also
+        returns variable -> framework, variable -> creation (line, col) and
+        the per-variable creation history, for every variable holding one
+        of these objects, wrapped ones included (`app = graph.compile()` is
+        still the agent)."""
+        targets = {k: _js_assign_target(e["node"]) for k, e in pending.items()}
+        prelim = {targets[k]: e["framework"] for k, e in pending.items() if targets[k]}
+        wrapped = {}
+        for k, e in pending.items():
+            hit = _js_wrapped_framework(e["callee"], targets[k], prelim, pending)
+            if hit is None:
+                continue
+            wrapped[k] = hit  # same object as its receiver -- don't count a second one
+            _, inner = hit
+            if inner is not None and targets[inner] is None:
+                targets[inner] = targets[k]  # `const app = new StateGraph(S)...compile()`
+        kept = [(targets[k], e) for k, e in pending.items() if k not in wrapped]
+        framework_by_var = {var: e["framework"] for var, e in kept if var}
+        line_by_var = {var: (e["line"], e["col"]) for var, e in kept if var}
+        history = {}
+        for var, e in kept:
+            if var:
+                history.setdefault(var, []).append(((e["line"], e["col"]), e["framework"]))
+        for k, (framework, inner) in wrapped.items():
+            var = targets[k]
+            if not var:
+                continue
+            framework_by_var.setdefault(var, framework)
+            receiver = targets[inner] if inner is not None else _js_identity(pending[k]["callee"])
+            if receiver in line_by_var:
+                line_by_var.setdefault(var, line_by_var[receiver])
+        return sorted(kept, key=lambda item: (item[1]["line"], item[1]["col"])), framework_by_var, line_by_var, history
+
+    kept_agents, agent_framework_by_var, _, _ = resolve(pending_agents)
+    kept_stores, store_framework_by_var, store_ref_by_var, store_history = resolve(pending_stores)
+    named_agents = [{
+        "name": _js_name_option(e["node"]) or var_name, "framework": e["framework"],
+        "line": e["line"], "tools_bound": tools_bound(e["node"]),
+        "matched_call": e["matched_call"], "variable": var_name,
+    } for var_name, e in kept_agents]
+    named_stores = [{
+        "variable": var_name, "framework": e["framework"], "line": e["line"],
+        "col": e["col"], "matched_call": e["matched_call"],
+    } for var_name, e in kept_stores]
+
+    # Cross-file: a store/agent created in another module and imported here
+    # by name through a relative import. Same evidence rule as Python -- a
+    # real import in THIS file of a variable the first pass saw that module
+    # create -- and a local creation always wins. A re-declaration only
+    # hides the import inside its own scope (`function f(kb) {..}`), so
+    # that is checked per use below, with `imported_here`.
+    external_names = set()
+    if external_exports:
+        redeclared_at_top = shadows.get(js_ast.key(root), ())
+        for local, binding in aliases.items():
+            if (binding.export in (None, "default") or local in redeclared_at_top
+                    or not (binding.module or "").startswith(".")):
+                continue
+            for path in _js_local_module_paths(filename, binding.module):
+                agent_fw = (external_exports.get("agents") or {}).get(path, {}).get(binding.export)
+                store_fw = (external_exports.get("stores") or {}).get(path, {}).get(binding.export)
+                if agent_fw and local not in agent_framework_by_var:
+                    agent_framework_by_var[local] = agent_fw
+                    external_names.add(local)
+                if store_fw and local not in store_framework_by_var:
+                    store_framework_by_var[local] = store_fw
+                    external_names.add(local)
+                    store_id = (external_exports.get("store_ids") or {}).get(path, {}).get(binding.export)
+                    if store_id:
+                        store_ref_by_var[local] = store_id
+                if agent_fw or store_fw:
+                    break
+
+    def imported_here(expr):
+        """False when `expr` starts from a name that IS an imported
+        store/agent at file level but is re-declared in the scope of this
+        use (a parameter or local of the same name)."""
+        ident = js_ast.unwrap(expr)
+        if ident is not None and ident.type != "shorthand_property_identifier":
+            ident = _js_root_identifier(ident)
+        return (ident is None or js_ast.text(ident) not in external_names
+                or js_ast.visible_binding(ident, aliases, shadows) is not None)
+
+    # Aliases (`const worker = kb`) and store handles (`const col = await
+    # client.getOrCreateCollection(..)`), to a fixed point as in Python.
+    assigns_by_func_and_name = {}
+    bindings = []
+    for node in js_ast.walk(root):
+        if node.type == "variable_declarator":
+            name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
+            target = js_ast.text(name) if name is not None and name.type == "identifier" else None
+        elif node.type == "assignment_expression":
+            target, value = _js_identity(node.child_by_field_name("left")), node.child_by_field_name("right")
+        elif node.type in ("public_field_definition", "field_definition"):
+            name = node.child_by_field_name("name") or node.child_by_field_name("property")
+            target, value = (f"this.{js_ast.text(name)}" if name is not None else None), node.child_by_field_name("value")
+        else:
+            continue
+        value = js_ast.unwrap(value)
+        if target is None or value is None:
+            continue
+        assigns_by_func_and_name[(_js_enclosing_function(node), target)] = value
+        bindings.append((target, value))
+    changed = True
+    while changed:
+        changed = False
+        for target, value in bindings:
+            if value.type in ("identifier", "member_expression"):
+                source_var, tables = _js_identity(value), (
+                    store_framework_by_var, store_ref_by_var, agent_framework_by_var)
+                # only a whole `x` / `this.x`, not a property read off one
+                if source_var is None or js_ast.text(value) != source_var:
+                    continue
+            elif value.type == "call_expression" and _js_is_store_handle_accessor(value.child_by_field_name("function")):
+                source_var = _js_store_receiver(value.child_by_field_name("function"))
+                tables = (store_framework_by_var, store_ref_by_var)
+            else:
+                continue
+            if source_var is None or source_var == target or not imported_here(value):
+                continue
+            for table in tables:
+                if source_var in table and target not in table:
+                    table[target] = table[source_var]
+                    changed = True
+
+    # store_agent_links: `new Agent({ memory: kb })` / `{ retriever }`.
+    store_agent_links = []
+    for var_name, e in kept_agents:
+        obj = _js_options_object(e["node"])
+        for kwarg in _STORE_LINK_KWARGS:
+            value = js_ast.unwrap(_js_object_property(obj, kwarg))
+            if value is None:
+                continue
+            linked = js_ast.text(value) if value.type == "shorthand_property_identifier" else _js_identity(value)
+            if linked in store_framework_by_var and imported_here(value):
+                store_agent_links.append({
+                    "store": linked,
+                    "store_ref": _store_at(linked, e["line"], store_framework_by_var,
+                                           store_ref_by_var, store_history)[1],
+                    "agent": _js_name_option(e["node"]) or var_name, "line": e["line"],
+                })
+                break
+
+    # Write/read/call sites. Role by method name, framework by the variable
+    # the call is made on -- which is what keeps one `kb.add(...)` from
+    # counting for every framework that lists `.add(`.
+    source_lines = source.splitlines()
+    creation_keys = set(pending_agents) | set(pending_stores)
+    write_sites, read_sites, call_sites = [], [], []
+    for node, callee, callee_text, is_new in calls:
+        callee = js_ast.unwrap(callee)
+        if is_new or callee is None or callee.type != "member_expression" or js_ast.key(node) in creation_keys:
+            continue
+        method = js_ast.text(callee.child_by_field_name("property"))
+        method_text = f".{method}("
+        receiver = _js_store_receiver(callee)
+        store_framework, store_ref = _store_at(receiver, js_ast.line(node), store_framework_by_var,
+                                               store_ref_by_var, store_history)
+        if not imported_here(callee):
+            store_framework = None
+        is_handle = _js_is_store_handle_accessor(callee)
+        if store_framework is not None and not is_handle and _match_constructor_text(
+                method_text, rag_writes_category, require_confirmation=False) is not None:
+            tainted, taint_source = _js_write_taint(node, assigns_by_func_and_name)
+            sanitized_nearby = _has_sanitizer_nearby(
+                source_lines, js_ast.line(node), keywords=_JS_SANITIZER_KEYWORDS) if tainted else False
+            write_sites.append({
+                "line": js_ast.line(node), "variable": receiver, "method": method,
+                "framework": store_framework, "store": store_ref,
+                "tainted": tainted, "taint_source": taint_source,
+                "sanitizer_nearby": sanitized_nearby,
+                "unsanitized": tainted and not sanitized_nearby,
+            })
+        if store_framework is not None and (not is_handle or method in _STORE_HANDLE_METHODS) and _match_constructor_text(
+                method_text, rag_reads_category, require_confirmation=False) is not None:
+            read_sites.append({
+                "line": js_ast.line(node), "variable": receiver, "method": method,
+                "framework": store_framework, "store": store_ref,
+            })
+        agent_receiver = _js_identity(callee)
+        agent_framework = agent_framework_by_var.get(agent_receiver)
+        if agent_framework is not None and imported_here(callee) and _match_constructor_text(
+                method_text, agent_calls_category, require_confirmation=False) is not None:
+            call_sites.append({
+                "line": js_ast.line(node), "variable": agent_receiver, "method": method,
+                "framework": agent_framework,
+            })
+
+    # Same rule as Python: list a file's imports only if it imports at
+    # least one tracked framework.
+    all_imports = [{
+        "local_name": local,
+        "canonical": f"{b.module}.{b.export}" if b.export else b.module,
+        "framework": js_ast.package_framework(b.module),
+    } for local, b in sorted(aliases.items())]
+    imports = all_imports if any(i["framework"] for i in all_imports) else []
+
+    return (parse_error, named_agents, named_stores, imports, store_agent_links,
+            write_sites, read_sites, call_sites, framework_uses,
+            {var: (fw, store_ref_by_var.get(var)) for var, fw in store_framework_by_var.items()},
+            agent_framework_by_var)
 
 
 def apply_framework_confirmation(categories):
