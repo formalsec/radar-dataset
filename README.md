@@ -134,6 +134,14 @@ python crawler/src/llm_screening/s1_classify_gpt.py \
 
 The scripts accept `--limit` and `--resume` options and write aggregate counts together with model reasoning and errors.
 
+To merge the judges with the manual review (crawler/output/llm_screening/s1_app_vs_framework/manual_review.xlsx) into the S1 dataset:
+
+```bash
+python crawler/src/llm_screening/merge_judges.py
+```
+
+A repository is kept when all judges label it `app`, or, when the judges disagree, when the manual review does. The manual review is only consulted when the judges disagree. This writes dataset/s1_apps.json (same format as dataset/all_repos.json) and dataset/s1_apps.xlsx (summary and per-repository labels).
+
 ### 3) Run the static scanner
 
 The scanner takes a JSON manifest of repositories (for example, a corpus or filtered subset) and analyzes the referenced repository source code to emit structured findings per repository.
