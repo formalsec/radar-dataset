@@ -109,26 +109,26 @@ Run `python main.py --list-groups` to see the exact query strings in each group.
 
 The crawler writes intermediate results into timestamped directories under crawler/output/crawl_results_*/ and retains the repositories that pass both the language and framework filters. Its persistent dataset state is stored under dataset/.
 
-### 2) Classify repositories as applications vs. frameworks
+### 2) Classify repositories as applications vs. frameworks (S1)
 
-The classification step is handled under crawler/src/ and writes generated files to crawler/output/llm_classifications/ by default.
+The classification step is handled under crawler/src/llm_screening/ and writes each judge's classifications to crawler/output/llm_screening/s1_app_vs_framework/judges/ by default.
 
 For Ollama-based classification:
 
 ```bash
 ollama serve
-python crawler/src/repoClassifier.py \
+python crawler/src/llm_screening/s1_classify.py \
   --input urls_to_classify.txt \
-  --output crawler/output/llm_classifications/classifications.json \
+  --output crawler/output/llm_screening/s1_app_vs_framework/judges/llama3.3.json \
   --model llama3.3
 ```
 
 For GPT-based classification:
 
 ```bash
-python crawler/src/repoClassifierGPT.py \
+python crawler/src/llm_screening/s1_classify_gpt.py \
   --input urls_to_classify.txt \
-  --output crawler/output/llm_classifications/classifications_gpt.json \
+  --output crawler/output/llm_screening/s1_app_vs_framework/judges/gpt-5.4-mini.json \
   --model gpt-5.4-mini
 ```
 

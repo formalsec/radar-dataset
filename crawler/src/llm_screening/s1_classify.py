@@ -12,8 +12,8 @@ import sys
 import gc
 import base64
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CLASSIFICATIONS_DIR = os.path.join(PROJECT_ROOT, 'crawler', 'output', 'llm_classifications')
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+CLASSIFICATIONS_DIR = os.path.join(PROJECT_ROOT, 'crawler', 'output', 'llm_screening', 's1_app_vs_framework', 'judges')
 
 class RepoClassifier:
     def __init__(self, ollama_url="http://localhost:11434", model="llama3.3"):
@@ -459,7 +459,7 @@ Reply with JSON: {{"classification": "app|framework|needs_review", "reasoning": 
     def process_urls(self, urls, output_file=None, resume=False):
         """Process URLs with incremental saving, rate limiting, and memory optimization"""
         if not output_file:
-            output_file = f"classifications_{self.model.replace(':', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            output_file = f"{self.model.replace(':', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
         self.results_file = output_file
         processed_urls = set()
@@ -741,7 +741,7 @@ def main():
     if not args.output:
         args.output = os.path.join(
             CLASSIFICATIONS_DIR,
-            f"classifications_{args.model.replace(':', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            f"{args.model.replace(':', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         )
     
     results = classifier.process_urls(urls, args.output, resume=args.resume)
