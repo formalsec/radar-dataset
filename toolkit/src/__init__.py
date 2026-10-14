@@ -6,7 +6,8 @@ rag_writes.md, rag_reads.md, a2a_interaction.md).
 
 Modules:
     pattern_index.py    -- builds src/data/patterns_verified.json from the .md files
-    pattern_detector.py -- per-file detection (ast for Python, regex for JS/TS)
+    pattern_detector.py -- per-file detection (ast for Python, tree-sitter + regex for JS/TS)
+    js_ast.py           -- tree-sitter parsing and import resolution for JS/TS
     incremental_json.py -- crash-safe, low-memory streaming JSON array writer
     util.py              -- timestamp helpers + run-metadata sidecar
     scan_local.py        -- scans repos already cloned to local disk

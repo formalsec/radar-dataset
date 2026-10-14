@@ -105,6 +105,7 @@
           ".compile(",
           "MessageGraph(",
           "StateGraph(",
+          "createReactAgent(",
           "create_react_agent(",
           "new StateGraph("
         ],
