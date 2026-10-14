@@ -34,8 +34,9 @@ The acquisition pipeline is:
 1. GitHub search for repositories mentioning agent terms and primarily implemented in Python, JavaScript, or TypeScript.
 2. Language composition filter: keep repositories where at least 70% of code is in those languages.
 3. Framework dependency filter: keep repositories that import or declare a dependency on at least one agent-development framework or protocol in the allow-list.
-4. Application vs. framework classification using multiple LLM judges plus manual review for ambiguous cases.
-5. Repository download and static analysis of the surviving applications.
+4. Application vs. framework classification (S1) using multiple LLM judges plus manual review for ambiguous cases.
+5. Agentic application filter (S2): a six-label classification of the S1 applications that keeps the agentic ones.
+6. Repository download and static analysis of the surviving applications.
 
 The resulting dataset contains repository-level metadata and security-relevant architectural findings.
 
@@ -142,7 +143,23 @@ python crawler/src/llm_screening/merge_judges.py
 
 A repository is kept when all judges label it `app`, or, when the judges disagree, when the manual review does. The manual review is only consulted when the judges disagree. This writes dataset/s1_apps.json (same format as dataset/all_repos.json) and dataset/s1_apps.xlsx (summary and per-repository labels).
 
-### 3) Run the static scanner
+### 3) Keep the agentic applications (S2)
+
+S2 classifies each S1 application into one of six labels (Agentic Applications, Non-Agentic Software, Curated Lists, Courses & Playbooks, External-Agent Wrappers & Interfaces, Tools & Skills for External Agents, Templates, Models & Benchmarks) or Needs Review. It reads dataset/s1_apps.json and writes each judge to crawler/output/llm_screening/s2_app_cleanup/judges/<model>.json by default.
+
+```bash
+export GITHUB_TOKEN="your-token"
+python crawler/src/llm_screening/s2_classify.py --model claude-sonnet-5-5
+python crawler/src/llm_screening/s2_classify.py --provider openai --model gpt-5.5
+```
+
+To merge the S2 judges (every file in its judges/ folder, plus crawler/output/llm_screening/s2_app_cleanup/manual_review.xlsx when it exists) into dataset/s2_agentic_apps.json and .xlsx:
+
+```bash
+python crawler/src/llm_screening/merge_judges.py --step s2
+```
+
+### 4) Run the static scanner
 
 The scanner takes a JSON manifest of repositories (for example, a corpus or filtered subset) and analyzes the referenced repository source code to emit structured findings per repository.
 

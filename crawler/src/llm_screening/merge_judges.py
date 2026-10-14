@@ -1,4 +1,4 @@
-"""Build the final dataset from the LLM judges and the manual review.
+"""Build a screening step's dataset from its LLM judges and manual review.
 
 A repo passes when:
   - all judges gave it the same label and that label is the wanted one, or
@@ -6,13 +6,16 @@ A repo passes when:
     wanted label. The manual review is only consulted when the judges disagree.
 
 Writes an .xlsx (summary + passing repos) and a JSON in the same format as
-dataset/all_repos.json containing only the passing repos.
+dataset/all_repos.json containing only the passing repos. --step picks the defaults
+(judges, label, input, manual review and output) for S1 or S2.
 
 Usage:
-    python merge_judges.py
+    python merge_judges.py                 # S1: app vs framework
+    python merge_judges.py --step s2       # S2: app cleanup, on the S1 output
     python merge_judges.py --label framework -o ../../../dataset/s1_frameworks
 """
 import argparse
+import glob
 import json
 import os
 from collections import Counter
@@ -26,22 +29,28 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-S1_DIR = os.path.join(PROJECT_ROOT, 'crawler', 'output', 'llm_screening', 's1_app_vs_framework')
-CLASSIFICATIONS_DIR = os.path.join(S1_DIR, 'judges')
-LABELS = ('app', 'framework')
-DEFAULT_JUDGES = ['deepseek=deepseek-r1.json', 'llama=llama3.1.json', 'gpt=gpt-5.4-mini.json']
+SCREENING_DIR = os.path.join(PROJECT_ROOT, 'crawler', 'output', 'llm_screening')
+DATASET_DIR = os.path.join(PROJECT_ROOT, 'dataset')
+# Per-step defaults; judges=None uses every file in the step's judges/ folder
+STEPS = {
+    's1': dict(dir='s1_app_vs_framework', label='app', repos='all_repos.json', output='s1_apps',
+               judges=['deepseek=deepseek-r1.json', 'llama=llama3.1.json', 'gpt=gpt-5.4-mini.json']),
+    's2': dict(dir='s2_app_cleanup', label='Agentic Applications', repos='s1_apps.json',
+               output='s2_agentic_apps', judges=None),
+}
+UNDECIDED = {'', 'error', 'needs_review', 'needs review'}  # judge answers that are not a label
 STAR_BUCKETS = [(0, '< 10'), (10, '10 - 99'), (100, '100 - 999'), (1000, '1k - 9.9k'), (10000, '10k+')]
 HEADER_FILL = PatternFill(start_color='DCE8F7', end_color='DCE8F7', fill_type='solid')
 
 
-def resolve_path(path):
-    return path if os.path.exists(path) else os.path.join(CLASSIFICATIONS_DIR, path)
+def resolve_path(path, judges_dir):
+    return path if os.path.exists(path) else os.path.join(judges_dir, path)
 
 
-def load_judge(spec):
+def load_judge(spec, judges_dir):
     """Parse 'name=path' (or just 'path') and return (name, {url: label})."""
     name, _, path = spec.rpartition('=')
-    with open(resolve_path(path)) as f:
+    with open(resolve_path(path, judges_dir)) as f:
         data = json.load(f)
     name = name or data.get('model', os.path.basename(path)).split(':')[0].replace('gpt-gpt-', 'gpt-')
     return name, {r['url']: 'error' if r.get('error') or not r.get('classification') else r['classification']
@@ -53,7 +62,10 @@ def is_formula(value):
 
 
 def load_manual(path):
-    """Return {url: decision} for every row of manual_review.xlsx with a typed-in Final Decision."""
+    """Return {url: decision} for every row of manual_review.xlsx with a typed-in Final Decision,
+    or {} when the step has no manual review yet."""
+    if not os.path.exists(path):
+        return {}
     rows = load_workbook(path)['Classifications'].iter_rows(values_only=True)
     col = {str(h).strip(): i for i, h in enumerate(next(rows)) if h}
     return {r[col['Repository URL']]: str(r[col['Final Decision']]).strip().lower()
@@ -62,8 +74,12 @@ def load_manual(path):
             and r[col['Final Decision']] and not is_formula(r[col['Final Decision']])}
 
 
+def is_label(value):
+    return value.lower() not in UNDECIDED
+
+
 def judges_agree(labels):
-    return len(set(labels)) == 1 and labels[0] in LABELS
+    return len(set(labels)) == 1 and is_label(labels[0])
 
 
 def select(repos, judges, manual, label):
@@ -75,7 +91,7 @@ def select(repos, judges, manual, label):
         if judges_agree(labels):
             if labels[0] == label:
                 selected.append((repo, 'judges', labels))
-        elif manual.get(repo['url']) == label:
+        elif manual.get(repo['url']) == label.lower():
             selected.append((repo, 'manual', labels))
     return selected
 
@@ -141,19 +157,19 @@ def write_summary_sheet(ws, repos, judges, selected, manual, label):
 
     ws['A1'] = f'Dataset summary: repos labelled {label!r}'
     ws['A1'].font = Font(bold=True, size=16)
-    ws['A2'] = f'Generated {datetime.now():%Y-%m-%d %H:%M} from {len(repos):,} crawled repos'
+    ws['A2'] = f'Generated {datetime.now():%Y-%m-%d %H:%M} from {len(repos):,} input repos'
     ws['A2'].font = Font(italic=True, color='52514E')
 
     row = add_table(ws, 4, 'Overview', ['metric', 'value'], [
         ('Repos in dataset', total),
-        ('Share of crawled repos', f'{total / len(repos) if repos else 0.0:.1%}'),
+        ('Share of input repos', f'{total / len(repos) if repos else 0.0:.1%}'),
         ('Selected by judge agreement', sources['judges']),
         ('Selected by manual review only', sources['manual']),
     ])
 
     split = [r['url'] for r in repos if not judges_agree([res.get(r['url'], '') for _, res in judges])]
     row = add_table(ws, row, 'How the dataset was built', ['step', 'repos'], [
-        ('Crawled repos', len(repos)),
+        ('Input repos', len(repos)),
         (f'All judges say {label}', sources['judges']),
         ('Judges disagree', len(split)),
         ('  of which manually reviewed', sum(u in manual for u in split)),
@@ -177,10 +193,10 @@ def write_summary_sheet(ws, repos, judges, selected, manual, label):
 
     pairs_rows = []
     for (name_a, res_a), (name_b, res_b) in combinations(judges, 2):
-        pairs = [(res_a[u], res_b[u]) for u in res_a.keys() & res_b.keys() if res_a[u] in LABELS and res_b[u] in LABELS]
+        pairs = [(res_a[u], res_b[u]) for u in res_a.keys() & res_b.keys() if is_label(res_a[u]) and is_label(res_b[u])]
         agreement = sum(a == b for a, b in pairs) / len(pairs) if pairs else 0.0
         pairs_rows.append((f'{name_a} vs {name_b}', len(pairs), agreement))
-    add_table(ws, row, f'Judge agreement on all {len(repos):,} crawled repos',
+    add_table(ws, row, f'Judge agreement on all {len(repos):,} input repos',
               ['judges', 'repos both labelled', '% agreement'], pairs_rows)
 
     ws.column_dimensions['A'].width = 48
@@ -190,22 +206,33 @@ def write_summary_sheet(ws, repos, judges, selected, manual, label):
 
 def main():
     parser = argparse.ArgumentParser(description='Build the final dataset from judge agreement and manual review')
-    parser.add_argument('judges', nargs='*', default=DEFAULT_JUDGES,
-                        help='Classification files as name=path or path (relative to s1_app_vs_framework/judges/)')
-    parser.add_argument('--label', default='app', help='Label a repo must have to pass (default: app)')
-    parser.add_argument('--repos', default=os.path.join(PROJECT_ROOT, 'dataset', 'all_repos.json'),
-                        help='Repos JSON to filter')
-    parser.add_argument('--manual', default=os.path.join(S1_DIR, 'manual_review.xlsx'),
-                        help='Manually reviewed spreadsheet')
-    parser.add_argument('--output', '-o', default=os.path.join(PROJECT_ROOT, 'dataset', 's1_apps'),
-                        help='Output path without extension; writes .xlsx and .json')
+    parser.add_argument('judges', nargs='*',
+                        help="Classification files as name=path or path (relative to the step's judges/ folder)")
+    parser.add_argument('--step', choices=STEPS, default='s1', help='Screening step whose defaults to use (default: s1)')
+    parser.add_argument('--label', help="Label a repo must have to pass (default: the step's, e.g. app)")
+    parser.add_argument('--repos', help="Repos JSON to filter (default: the step's input, e.g. dataset/all_repos.json)")
+    parser.add_argument('--manual', help="Manually reviewed spreadsheet (default: the step's manual_review.xlsx)")
+    parser.add_argument('--output', '-o', help="Output path without extension; writes .xlsx and .json "
+                                                "(default: the step's, e.g. dataset/s1_apps)")
     args = parser.parse_args()
 
-    judges = [load_judge(spec) for spec in args.judges]
+    step = STEPS[args.step]
+    step_dir = os.path.join(SCREENING_DIR, step['dir'])
+    judges_dir = os.path.join(step_dir, 'judges')
+    args.label = args.label or step['label']
+    args.repos = args.repos or os.path.join(DATASET_DIR, step['repos'])
+    args.manual = args.manual or os.path.join(step_dir, 'manual_review.xlsx')
+    args.output = args.output or os.path.join(DATASET_DIR, step['output'])
+    specs = args.judges or step['judges'] or [
+        f'{os.path.basename(p)[:-5]}={p}' for p in sorted(glob.glob(os.path.join(judges_dir, '*.json')))]
+    if not specs:
+        parser.error(f'no judge files given or found in {judges_dir}')
+
+    judges = [load_judge(spec, judges_dir) for spec in specs]
     with open(args.repos) as f:
         all_repos = json.load(f)
     repos = all_repos['repos']
-    manual = load_manual(resolve_path(args.manual))
+    manual = load_manual(resolve_path(args.manual, step_dir))
     selected = select(repos, judges, manual, args.label)
     sources = Counter(source for _, source, _ in selected)
 
