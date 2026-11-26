@@ -291,9 +291,15 @@ def scan_tarball(detector, tar_bytes):
             custom_agent_instances.append(c)
         for s in result.named_stores:
             sid = _store_id(rel, (s["line"], s["col"]))
+            line_content = next((f.get("line_content") for f in result.findings
+                                 if f["type"] == "store" and f["line"] == s["line"]), None)
             stores[sid] = {
                 "id": sid, "variable": s["variable"], "framework": s["framework"],
-                "file": rel, "line": s["line"], "n_writes": 0, "n_reads": 0, "agents": set(),
+                "backend": s.get("backend") or s["framework"],
+                "file": rel, "line": s["line"], "line_content": line_content,
+                "package": s.get("package"), "module": s.get("module"),
+                "matched": s.get("matched_call"), "params": s.get("params") or [],
+                "n_writes": 0, "n_reads": 0, "agents": set(),
             }
         for link in result.store_agent_links:
             store_agent_links.append({**link, "store_id": _store_id(rel, link.get("store_ref"))})
@@ -325,6 +331,39 @@ def scan_tarball(detector, tar_bytes):
          "tool_names": f.get("tool_names")}
         for f in findings if f["type"] == "custom_agent"
     ]
+    # A write/read carries the package of the STORE it targets, which may
+    # have been created in a file processed after it.
+    for f in findings:
+        if f["type"] in ("write", "read") and f.get("store") in stores:
+            f["package"] = stores[f["store"]]["package"]
+            f["module"] = stores[f["store"]]["module"]
+
+    def element(f, **extra):
+        """One identified element with the evidence kept for every count:
+        line of code, file, package, framework, pattern and parameters."""
+        return {"name": f.get("name"), "framework": f.get("framework"),
+                "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
+                "package": f.get("package"), "module": f.get("module"),
+                "matched": f.get("matched"), "params": f.get("params") or [], **extra}
+
+    rag_interaction_evidence = [
+        element(f, kind=f["type"], store=f.get("store"), unsanitized=f.get("unsanitized"))
+        for f in findings if f["type"] in ("write", "read")
+    ]
+    tool_definition_sites = [element(f) for f in findings if f["type"] == "confirmed_tool_definition"]
+    # Tool interactions: tools bound to an agent or a model at construction
+    # (`Agent(tools=[...])`, `.bind_tools([...])`, `create(tools=...)`),
+    # tools invoked directly, and MCP tools called through a client.
+    tool_interaction_evidence = [
+        element(f, kind="bind_agent", tools=f["tools_bound"])
+        for f in findings if f["type"] == "agent" and f.get("tools_bound")
+    ] + [
+        element(f, kind="bind_model", tools=f.get("tool_names") or [])
+        for f in findings if f["type"] == "tool_use" and f.get("framework")
+    ] + [
+        element(f, kind=f["kind"], tools=[f["name"]] if f.get("name") else [])
+        for f in findings if f["type"] == "tool_interaction"
+    ]
     tools_evidence = [
         {"name": tool_name, "agent": f["name"], "framework": f["framework"],
          "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
@@ -340,7 +379,8 @@ def scan_tarball(detector, tar_bytes):
     ] + [
         {"name": f["name"], "agent": None, "framework": f["framework"],
          "file": f["file"], "line": f["line"], "line_content": f.get("line_content"),
-         "source": "confirmed_tool_definition"}
+         "source": "confirmed_tool_definition", "package": f.get("package"),
+         "module": f.get("module"), "matched": f.get("matched"), "params": f.get("params") or []}
         for f in findings if f["type"] == "confirmed_tool_definition" and f.get("name")
     ]
     tool_definition_evidence = [
@@ -417,12 +457,26 @@ def scan_tarball(detector, tar_bytes):
         ),
         "n_tool_definition_markers": len(tool_definition_evidence),
         "tool_definition_evidence": tool_definition_evidence,
+        # every confirmed definition SITE (n_confirmed_tool_definitions only
+        # counts the named ones), and every interaction with a tool
+        "n_tool_definitions": len(tool_definition_sites),
+        "tool_definition_sites": tool_definition_sites,
+        "n_tool_interactions": len(tool_interaction_evidence),
+        "n_tool_bindings": sum(1 for t in tool_interaction_evidence if t["kind"].startswith("bind")),
+        "n_tool_invocations": sum(1 for t in tool_interaction_evidence if t["kind"] == "invoke"),
+        "n_mcp_tool_calls": sum(1 for t in tool_interaction_evidence if t["kind"] == "mcp_call"),
+        "tool_interaction_evidence": tool_interaction_evidence,
         "has_rag": has_rag,
         "n_stores": len(stores),
         "store_evidence": store_evidence,
         "store_frameworks": sorted({s["framework"] for s in stores.values()}),
+        "store_backends": sorted({s["backend"] for s in stores.values()}),
         "n_stores_written": sum(1 for s in stores.values() if s["n_writes"]),
         "n_stores_read": sum(1 for s in stores.values() if s["n_reads"]),
+        "n_rag_writes": len(write_sites),
+        "n_rag_reads": len(read_sites),
+        "n_rag_interactions": len(write_sites) + len(read_sites),
+        "rag_interaction_evidence": rag_interaction_evidence,
         "rag_write_frameworks": sorted({w["framework"] for w in write_sites}),
         "rag_read_frameworks": sorted({r["framework"] for r in read_sites}),
         "shared_across_agents": shared_across_agents,

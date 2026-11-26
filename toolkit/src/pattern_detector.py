@@ -197,6 +197,13 @@ _STORE_HANDLE_METHODS = {
 # `.get(` everywhere else, so it only counts under `.collections`.
 _STORE_HANDLE_NAMESPACE_METHODS = {"collections": {"get", "create", "use"}}
 
+# Accessors that turn a store into a retriever / query engine. The handle
+# they return reads from the store, so an `.invoke(`/`.ainvoke(` on it (the
+# LangChain LCEL retriever API) is a RAG read -- otherwise invisible, since
+# `.invoke(` is too generic to be a read pattern on its own.
+_RETRIEVER_METHODS = {"as_retriever", "asRetriever", "as_query_engine", "asQueryEngine"}
+_RETRIEVER_INVOKE_METHODS = {"invoke", "ainvoke"}
+
 # Modules whose own `.compile(` method has nothing to do with an agent
 # graph (re.compile, py_compile.compile, ...) but share the generic
 # "Graph Compile" pattern's bare `.compile(` text. TODO: extend as real
@@ -250,6 +257,11 @@ class FileResult:
     # import by name -- see scan_api._collect_exports.
     store_vars: dict = field(default_factory=dict)
     agent_vars: dict = field(default_factory=dict)
+    # Code that USES a tool rather than defining it: a tool invoked directly
+    # (`search.invoke(...)`) or an MCP tool called through a client
+    # (`session.call_tool(...)`). Binding tools to an agent is recorded on
+    # the agent / tool_use findings themselves (tools_bound / tool_names).
+    tool_interactions: list = field(default_factory=list)
 
 
 class CompiledCategory:
@@ -392,20 +404,27 @@ class PatternDetector:
             (reduced_text, parse_error, named_agents, named_stores,
              store_links, tainted_writes, write_sites, read_sites, call_sites, imports,
              llm_tool_calls, tool_use_markers, agent_markers,
-             confirmed_tool_definitions, framework_uses, store_vars, agent_vars) = reduced
+             confirmed_tool_definitions, framework_uses, store_vars, agent_vars,
+             tool_interactions) = reduced
         else:
             reduced_text, parse_error = _reduce_javascript(source), None
             named_stores, store_links, tainted_writes, write_sites, read_sites, call_sites, imports = [], [], [], [], [], [], []
-            framework_uses, store_vars, agent_vars = {}, {}, {}
+            framework_uses, store_vars, agent_vars, tool_interactions = {}, {}, {}, []
+            confirmed_tool_definitions = (
+                _detect_webmcp_tool_definitions(source_lines, filename, javascript_sources)
+                + _detect_js_registry_tool_definitions(source_lines, filename, javascript_sources)
+                + _detect_js_mcp_server_tool_definitions(source_lines)
+            )
             if js_ast.AVAILABLE:
                 (parse_error, named_agents, named_stores, imports, store_links,
                  write_sites, read_sites, call_sites, framework_uses,
-                 store_vars, agent_vars) = _reduce_javascript_ast(
+                 store_vars, agent_vars, confirmed_tool_definitions,
+                 tool_interactions) = _reduce_javascript_ast(
                     source, filename, self._agent_creation_category,
                     self._rag_creation_category, self._framework_languages,
                     javascript_sources, self._rag_writes_category,
                     self._rag_reads_category, self._agent_calls_category,
-                    external_exports,
+                    external_exports, confirmed_tool_definitions,
                 )
                 tainted_writes = [w for w in write_sites if w["unsanitized"]]
             else:
@@ -418,11 +437,6 @@ class PatternDetector:
             llm_tool_calls = _detect_bind_tools_calls(source_lines)
             tool_use_markers = _detect_tool_use_markers(source_lines)
             agent_markers = _detect_agent_markers(source_lines)
-            confirmed_tool_definitions = (
-                _detect_webmcp_tool_definitions(source_lines, filename, javascript_sources)
-                + _detect_js_registry_tool_definitions(source_lines, filename, javascript_sources)
-                + _detect_js_mcp_server_tool_definitions(source_lines)
-            )
 
         result = FileResult(
             language=language, parse_error=parse_error,
@@ -435,6 +449,7 @@ class PatternDetector:
             custom_agents=_group_custom_agents(llm_tool_calls),
             confirmed_tool_definitions=confirmed_tool_definitions,
             framework_uses=framework_uses, store_vars=store_vars, agent_vars=agent_vars,
+            tool_interactions=tool_interactions,
         )
 
         # ONE flat list, same shape for everything: what was found, what
@@ -445,17 +460,24 @@ class PatternDetector:
         def _line_content(lineno):
             return source_lines[lineno - 1].strip() if 0 < lineno <= len(source_lines) else None
 
+        def _evidence(item):
+            """package / module / params, the same three keys everywhere."""
+            return {"package": item.get("package"), "module": item.get("module"),
+                    "params": item.get("params") or []}
+
         findings = []
         for a in named_agents:
             findings.append({
                 "type": "agent", "name": a["name"], "framework": a["framework"],
                 "matched": a.get("matched_call"), "line": a["line"],
                 "line_content": _line_content(a["line"]), "tools_bound": a.get("tools_bound"),
+                **_evidence(a),
             })
         for s in named_stores:
             findings.append({
                 "type": "store", "name": s["variable"], "framework": s["framework"],
                 "matched": s.get("matched_call"), "line": s["line"],
+                "line_content": _line_content(s["line"]), **_evidence(s),
             })
         for c in call_sites:
             findings.append({
@@ -467,11 +489,16 @@ class PatternDetector:
                 "type": "write", "name": w["variable"], "framework": w.get("framework"),
                 "matched": f".{w['method']}(", "line": w["line"],
                 "unsanitized": w.get("unsanitized"), "store": w.get("store"),
+                "line_content": _line_content(w["line"]),
+                # package/module are the STORE's; scan_api fills them in from the store
+                "package": None, "module": None, "params": w.get("params") or [],
             })
         for r in read_sites:
             findings.append({
                 "type": "read", "name": r["variable"], "framework": r.get("framework"),
                 "matched": f".{r['method']}(", "line": r["line"], "store": r.get("store"),
+                "line_content": _line_content(r["line"]),
+                "package": None, "module": None, "params": r.get("params") or [],
             })
         # tool_use, from two sources, both located by line so they can be
         # spot-checked the same way as everything else:
@@ -481,8 +508,9 @@ class PatternDetector:
         for t in llm_tool_calls:
             findings.append({
                 "type": "tool_use", "name": t["variable"], "framework": t["framework"],
-                "matched": "tools=", "line": t["line"],
+                "matched": t.get("matched_call") or "tools=", "line": t["line"],
                 "line_content": _line_content(t["line"]), "tool_names": t.get("tool_names"),
+                **_evidence(t),
             })
         for m in tool_use_markers:
             findings.append({
@@ -511,7 +539,13 @@ class PatternDetector:
             findings.append({
                 "type": "confirmed_tool_definition", "name": t["name"], "framework": t["framework"],
                 "matched": t.get("matched_call"), "line": t["line"],
-                "line_content": _line_content(t["line"]),
+                "line_content": _line_content(t["line"]), **_evidence(t),
+            })
+        for t in tool_interactions:
+            findings.append({
+                "type": "tool_interaction", "kind": t["kind"], "name": t.get("tool"),
+                "framework": t["framework"], "matched": t["matched_call"], "line": t["line"],
+                "line_content": _line_content(t["line"]), "variable": t["variable"], **_evidence(t),
             })
         # custom_agent: a hand-rolled agent counted separately from
         # framework-confirmed ones (n_custom_agents in scan_api.py, not
@@ -719,6 +753,11 @@ def _build_subclass_extensions(tree, agent_creation_category, rag_creation_categ
             fw = _match_constructor_text(base_text, rag_creation_category, base_frameworks)
             if fw is None and canonical_base_text:
                 fw = _match_constructor_text(canonical_base_text, rag_creation_category, base_frameworks)
+            # Same rule as for calls: a generic `Client` base (botpy.Client,
+            # discord.Client) only makes a store when it comes from a
+            # tracked store package.
+            if fw == "Generic Client" and not (base_frameworks & set(rag_creation_category.frameworks)):
+                fw = None
             if fw is not None:
                 extra_stores[node.name] = fw
     return extra_agents, extra_stores
@@ -885,6 +924,148 @@ def _usage_framework(func_node, import_aliases):
     if framework == "Google GenAI" and not canonical.startswith(("google.genai", "google.generativeai")):
         return None, None
     return framework, canonical
+
+
+# Evidence attached to every store, read, write, tool definition and tool
+# interaction: the import the call resolves to (package = the top-level
+# installable name, module = the full import path) and the call's
+# arguments as source text, one entry per argument, clipped so a long
+# literal can't bloat the output.
+_PARAM_MAX_CHARS = 200
+
+
+def _clip_param(text):
+    text = " ".join((text or "").split())
+    return text if len(text) <= _PARAM_MAX_CHARS else text[:_PARAM_MAX_CHARS - 3] + "..."
+
+
+def _py_call_params(call_node):
+    """`Chroma(path="db", **cfg)` -> ['path="db"', '**cfg']"""
+    params = [_clip_param(_resolve_expr_text(a)) for a in call_node.args]
+    params += [_clip_param(f"{kw.arg}={_resolve_expr_text(kw.value)}" if kw.arg
+                           else f"**{_resolve_expr_text(kw.value)}") for kw in call_node.keywords]
+    return params
+
+
+def _py_function_params(func_node):
+    """A tool function's own parameters: `def search(self, q: str, k=5)` ->
+    ['q: str', 'k']. For a decorated tool these ARE the tool's inputs."""
+    if func_node is None:
+        return []
+    a = func_node.args
+    positional = a.posonlyargs + a.args
+    if positional and positional[0].arg in ("self", "cls"):
+        positional = positional[1:]
+
+    def fmt(arg, prefix=""):
+        ann = f": {_resolve_expr_text(arg.annotation)}" if arg.annotation is not None else ""
+        return _clip_param(f"{prefix}{arg.arg}{ann}")
+
+    params = [fmt(arg) for arg in positional]
+    if a.vararg:
+        params.append(fmt(a.vararg, "*"))
+    params += [fmt(arg) for arg in a.kwonlyargs]
+    if a.kwarg:
+        params.append(fmt(a.kwarg, "**"))
+    return params
+
+
+def _py_var_import_source(name, assigns_by_func_and_name, import_aliases):
+    """(package, module) of the call a variable was last assigned from in
+    any function: `mcp = FastMCP("x")` -> ("mcp", "mcp.server.fastmcp"), so
+    `@mcp.tool` and `llm.bind_tools(...)` get the package of their object."""
+    for (_, var), value in assigns_by_func_and_name.items():
+        if var == name and isinstance(value, ast.Call):
+            source = _py_import_source(value.func, import_aliases)
+            if source != (None, None):
+                return source
+    return None, None
+
+
+def _py_import_source(func_node, import_aliases):
+    """-> (package, module) for the import a callee/decorator/base traces
+    back to: `Chroma(` after `from langchain_community.vectorstores import
+    Chroma` -> ("langchain_community", "langchain_community.vectorstores")."""
+    node = func_node
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None, None
+    canonical = import_aliases.get(node.id)
+    if not canonical:
+        return None, None
+    module = canonical.rpartition(".")[0] if "." in canonical else canonical
+    return canonical.split(".")[0], module
+
+
+# Vector stores reached through an orchestration framework's integration
+# layer instead of the database's own SDK: `Chroma(...)` / `FAISS.from_documents(...)`
+# imported from langchain_community.vectorstores, `new MemoryVectorStore()`
+# from langchain/vectorstores/memory, `ChromaVectorStore(...)` from
+# llama_index.vector_stores.chroma. The pattern table can't confirm these
+# (the import resolves to LangChain/LlamaIndex, not to Chroma), so they are
+# recognised by the module the class is imported from. framework = the
+# framework whose API is used (LangChain, LlamaIndex); backend = the class.
+_STORE_INTEGRATION_MODULE_RE = re.compile(
+    r"(?:^|[./])vectorstores?(?:[./]|$)|(?:^|[./])vector_stores(?:[./]|$)"
+)
+_STORE_INTEGRATION_PACKAGE_RE = re.compile(
+    r"^langchain[_-](?:chroma|pinecone|qdrant|milvus|postgres|weaviate|elasticsearch|mongodb|redis|astradb)"
+    r"|^@langchain/(?:pinecone|qdrant|weaviate|mongodb|redis|mongo|exa|cloudflare)"
+)
+_STORE_CLASS_SUFFIXES = ("VectorStore", "VectorSearch", "Store", "Chroma", "Qdrant", "Milvus",
+                         "PGVector", "FAISS", "Weaviate", "Pinecone")
+_STORE_CLASSMETHODS = {
+    "from_documents", "from_texts", "from_existing_index", "from_embeddings", "load_local",
+    "afrom_documents", "afrom_texts", "from_params",
+    "fromDocuments", "fromTexts", "fromExistingIndex", "fromExistingCollection", "load",
+}
+
+
+def _integration_store(module, class_name, method, framework):
+    """-> (framework, backend) when `module.class_name[.method](` creates a
+    vector store through a framework integration, else None."""
+    if framework not in ("LangChain", "LangGraph", "LlamaIndex") or not class_name or not class_name[0].isupper():
+        return None
+    if method is not None and method not in _STORE_CLASSMETHODS:
+        return None
+    if class_name.endswith(("Embeddings", "Retriever", "Loader", "Splitter", "Config", "Settings")):
+        return None
+    # vector_stores modules also export the query/filter types used with a
+    # store (MetadataFilters, VectorStoreQuery, ApproxRetrievalStrategy).
+    if any(word in class_name for word in ("Filter", "Query", "Strategy", "Result", "Info", "Mode",
+                                           "Condition", "Operator")):
+        return None
+    if _STORE_INTEGRATION_MODULE_RE.search(module or ""):
+        return ("LangChain" if framework == "LangGraph" else framework), class_name
+    if _STORE_INTEGRATION_PACKAGE_RE.search(module or "") and class_name.endswith(_STORE_CLASS_SUFFIXES):
+        return framework, class_name
+    return None
+
+
+def _py_integration_store(callee, import_aliases):
+    canonical = _canonical_call_text(callee, import_aliases)
+    if not canonical:
+        return None
+    parts = canonical[:-1].split(".")
+    method = None
+    if len(parts) >= 2 and not parts[-1][:1].isupper():
+        method, parts = parts[-1], parts[:-1]
+    if len(parts) < 2:
+        return None
+    module, class_name = ".".join(parts[:-1]), parts[-1]
+    return _integration_store(module, class_name, method, _resolve_module_framework(module))
+
+
+# Methods that run a tool object directly, as opposed to handing it to an
+# agent. Only counted on a variable known to hold a confirmed tool.
+_TOOL_INVOKE_METHODS = {
+    "invoke", "ainvoke", "run", "arun", "_run", "_arun", "call", "acall",
+    "execute", "forward", "func",
+}
+# MCP client calls: `session.call_tool("name", args)` / `client.callTool(..)`.
+_MCP_CALL_TOOL_METHODS = {"call_tool", "callTool"}
+_PY_MCP_CLIENT_MODULES = {"mcp": "MCP SDK", "fastmcp": "FastMCP", "langchain_mcp_adapters": "LangChain"}
 
 
 def _tool_element_identifier(elt, import_aliases=None):
@@ -2387,14 +2568,15 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     Returns (reduced_text, parse_error, named_agents, named_stores,
     store_agent_links, tainted_writes, write_sites, read_sites, call_sites,
     imports, llm_tool_calls, tool_use_markers, agent_markers,
-    confirmed_tool_definitions, framework_uses, store_vars, agent_vars).
+    confirmed_tool_definitions, framework_uses, store_vars, agent_vars,
+    tool_interactions).
     """
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError) as e:
-        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], [], [], {}, {}, {}
+        return source, f"{type(e).__name__}: {e}", [], [], [], [], [], [], [], [], [], [], [], [], {}, {}, {}, []
     except RecursionError as e:
-        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], [], [], {}, {}, {}
+        return source, f"RecursionError: {e}", [], [], [], [], [], [], [], [], [], [], [], [], {}, {}, {}, []
 
     source_lines = source.splitlines()
     import_aliases = _build_import_aliases(tree)
@@ -2428,6 +2610,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     pending_llm_clients = {}
     pending_tool_def_calls = {}
     confirmed_tool_definitions = []
+    # decorated tool function / BaseTool subclass name -> (framework, package, module)
+    tool_class_or_function = {}
     assign_target_for_call = {}
     assigns_by_func_and_name = {}  # (func_ctx, var_name) -> most recent Assign.value node
     framework_uses = {}
@@ -2508,6 +2692,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                     ),
                     "call_node": node,
                     "matched_call": call_text,  # e.g. "SolidAssistantAgent(" -- so you can eyeball-confirm the match
+                    "params": _py_call_params(node),
+                    **dict(zip(("package", "module"), _py_import_source(callee, import_aliases))),
                 }
                 continue  # a call site is either an agent or a store, not both
 
@@ -2520,18 +2706,26 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             # "Generic Client" is any `Client(`: only a store when the name
             # comes from a tracked store package, same rule as the JS pass.
             # Otherwise it is genai.Client(), notion Client(), httpx.Client().
-            if store_framework == "Generic Client" and not (
-                    call_frameworks & set(rag_creation_category.frameworks)):
-                store_framework = None
+            if store_framework == "Generic Client":
+                # a store package's own Client (chromadb.HttpClient) is that store
+                tracked = call_frameworks & set(rag_creation_category.frameworks)
+                store_framework = sorted(tracked)[0] if tracked else None
             if store_framework is None and isinstance(callee, ast.Name):
                 store_framework = extra_store_classes.get(callee.id)
+            backend = store_framework
+            if store_framework is None or store_framework not in rag_creation_category.frameworks:
+                integration = _py_integration_store(callee, import_aliases)
+                if integration is not None:
+                    store_framework, backend = integration
             if store_framework is not None:
                 pending_store_calls[id(node)] = {
-                    "framework": store_framework,
+                    "framework": store_framework, "backend": backend,
                     "line": node.lineno,
                     "col": node.col_offset + 1,
                     "call_node": node,
                     "matched_call": call_text,
+                    "params": _py_call_params(node),
+                    **dict(zip(("package", "module"), _py_import_source(callee, import_aliases))),
                 }
 
             if tool_definition_category is not None:
@@ -2543,6 +2737,8 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                         "framework": tool_def_framework,
                         "line": node.lineno,
                         "matched_call": call_text,
+                        "params": _py_call_params(node),
+                        **dict(zip(("package", "module"), _py_import_source(callee, import_aliases))),
                     }
 
             # LLM SDK client creation (Option A foundation): confirms which
@@ -2555,6 +2751,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 pending_llm_clients[id(node)] = {
                     "framework": LLM_CLIENT_CONSTRUCTORS[llm_client_name],
                     "line": node.lineno,
+                    "source": _py_import_source(callee, import_aliases),
                 }
             elif llm_client_name in llm_client_factory_functions:
                 pending_llm_clients[id(node)] = {
@@ -2598,11 +2795,22 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                                 f"@{canonical_dec[:-1]}", tool_definition_category, dec_frameworks,
                             )
                     if dec_fw is not None:
+                        package, module = _py_import_source(dec_func, import_aliases)
+                        if package is None:
+                            root = dec_func
+                            while isinstance(root, ast.Attribute):
+                                root = root.value
+                            if isinstance(root, ast.Name):
+                                package, module = _py_var_import_source(
+                                    root.id, assigns_by_func_and_name, import_aliases)
                         confirmed_tool_definitions.append({
                             "framework": dec_fw, "name": node.name,
                             "line": getattr(dec, "lineno", node.lineno),
                             "matched_call": dec_text,
+                            "package": package, "module": module,
+                            "params": _py_function_params(node),
                         })
+                        tool_class_or_function[node.name] = (dec_fw, package, module)
             if isinstance(node, ast.ClassDef):
                 for base in node.bases:
                     record_use(base)
@@ -2622,10 +2830,16 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                         _frameworks_for_call_identifier(base, import_aliases),
                     )
                     if base_fw is not None:
+                        package, module = _py_import_source(base, import_aliases)
+                        run = next((stmt for stmt in node.body if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                    and stmt.name in ("_run", "_arun")), None)
                         confirmed_tool_definitions.append({
                             "framework": base_fw, "name": tool_name,
                             "line": node.lineno, "matched_call": base_text,
+                            "package": package, "module": module,
+                            "params": _py_function_params(run),
                         })
+                        tool_class_or_function[node.name] = (base_fw, package, module)
                         break
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             lines.append(node.value)
@@ -2671,6 +2885,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             "name": entry["name"], "framework": entry["framework"],
             "line": entry["line"], "tools_bound": entry["tools_bound"],
             "matched_call": entry["matched_call"],
+            "package": entry["package"], "module": entry["module"], "params": entry["params"],
             # "variable" is the ASSIGNMENT TARGET, kept separate from "name"
             # (which prefers a name=/role=/id= kwarg for display). Only the
             # variable is importable from another module, so cross-file
@@ -2713,8 +2928,9 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             store_ref_by_var[var_name] = (entry["line"], entry["col"])
             store_history.setdefault(var_name, []).append(((entry["line"], entry["col"]), entry["framework"]))
         named_stores.append({
-            "variable": var_name, "framework": entry["framework"], "line": entry["line"],
-            "col": entry["col"], "matched_call": entry["matched_call"],
+            "variable": var_name, "framework": entry["framework"], "backend": entry["backend"],
+            "line": entry["line"], "col": entry["col"], "matched_call": entry["matched_call"],
+            "package": entry["package"], "module": entry["module"], "params": entry["params"],
         })
     for var_name, receiver in wrapped_store_receivers.items():
         if receiver in store_ref_by_var:
@@ -2726,6 +2942,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             "name": assign_target_for_call.get(call_id),
             "line": entry["line"],
             "matched_call": entry["matched_call"],
+            "package": entry["package"], "module": entry["module"], "params": entry["params"],
         })
 
     # CROSS-FILE resolution: a store OR agent created in another file and
@@ -2787,10 +3004,12 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
     # rag_writers/rag_readers empty whenever the store, the agent and the
     # write lived in three different files. Confirmed by testing.
     llm_client_framework_by_var = {}
+    llm_client_source_by_var = {}
     for call_id, entry in pending_llm_clients.items():
         var_name = assign_target_for_call.get(call_id)
         if var_name:
             llm_client_framework_by_var[var_name] = entry["framework"]
+            llm_client_source_by_var[var_name] = entry.get("source", (None, None))
 
     # Variable-to-variable aliasing: `worker = kb` should let `worker`
     # inherit whatever `kb` was already known to be, so a later
@@ -2860,7 +3079,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             sanitized_nearby = _has_sanitizer_nearby(source_lines, node.lineno) if tainted else False
             write_sites.append({
                 "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": framework, "store": store_ref,
+                "framework": framework, "store": store_ref, "params": _py_call_params(node),
                 "tainted": tainted, "taint_source": taint_source,
                 "sanitizer_nearby": sanitized_nearby,
                 "unsanitized": tainted and not sanitized_nearby,
@@ -2887,9 +3106,12 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
                 matched_call = f"{ast.unparse(node.func)}("
             except Exception:
                 matched_call = f".{node.func.attr}("
+            receiver = _resolve_identity(node.func)
+            package, module = _py_var_import_source(receiver, assigns_by_func_and_name, import_aliases)
             llm_tool_calls.append({
-                "line": node.lineno, "variable": _resolve_identity(node.func), "framework": "LangChain",
+                "line": node.lineno, "variable": receiver, "framework": "LangChain",
                 "matched_call": matched_call, "tool_names": _extract_bind_tools_names(node),
+                "package": package, "module": module, "params": _py_call_params(node),
             })
             continue
         base_var = _resolve_identity(node.func)
@@ -2918,14 +3140,84 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             matched_call = f"{ast.unparse(node.func)}("  # e.g. "self.client.chat.completions.create(" -- the actual evidence primitive
         except Exception:
             matched_call = f".{node.func.attr}("
+        package, module = llm_client_source_by_var.get(base_var, (None, None))
         llm_tool_calls.append({
             "line": node.lineno, "variable": base_var, "framework": framework,
             "matched_call": matched_call,
             "tool_names": tool_names,  # None means confirmed-but-not-extractable, see docstring above
+            "package": package, "module": module, "params": _py_call_params(node),
         })
 
     tool_use_markers = _detect_tool_use_markers(source_lines)
     agent_markers = _detect_agent_markers(source_lines)
+
+    # tool_interactions: a confirmed tool invoked directly, or an MCP tool
+    # called through a client. Tool variables are the decorated functions,
+    # the variables a tool-definition call is assigned to, and instances
+    # of a BaseTool-style subclass defined here; aliases are followed.
+    tool_source_by_var = dict(tool_class_or_function)
+    for call_id, entry in pending_tool_def_calls.items():
+        var_name = assign_target_for_call.get(call_id)
+        if var_name:
+            tool_source_by_var[var_name] = (entry["framework"], entry["package"], entry["module"])
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name) and node.value.func.id in tool_class_or_function):
+            var_name = _extract_simple_target_name(node.targets)
+            if var_name:
+                tool_source_by_var[var_name] = tool_class_or_function[node.value.func.id]
+    _resolve_variable_aliases(tree, tool_source_by_var)
+    mcp_client_source = next((
+        (_PY_MCP_CLIENT_MODULES[c.split(".")[0]], c.split(".")[0], c.rpartition(".")[0] or c)
+        for c in import_aliases.values() if c.split(".")[0] in _PY_MCP_CLIENT_MODULES
+    ), None)
+    tool_interactions = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        method = node.func.attr
+        receiver = _resolve_identity(node.func)
+        if method in _TOOL_INVOKE_METHODS and receiver in tool_source_by_var:
+            kind, (framework, package, module) = "invoke", tool_source_by_var[receiver]
+        elif method in _MCP_CALL_TOOL_METHODS and mcp_client_source is not None:
+            kind, (framework, package, module) = "mcp_call", mcp_client_source
+        else:
+            continue
+        first = node.args[0] if node.args else None
+        tool_interactions.append({
+            "kind": kind, "line": node.lineno, "variable": receiver, "method": method,
+            "framework": framework, "package": package, "module": module,
+            "matched_call": f".{method}(", "params": _py_call_params(node),
+            # mcp_call: the tool's name when it is a literal
+            "tool": first.value if kind == "mcp_call" and isinstance(first, ast.Constant) and isinstance(first.value, str)
+                    else (receiver if kind == "invoke" else None),
+        })
+
+    # Variables holding a retriever / query engine (`r = kb.as_retriever()`),
+    # so `r.invoke(q)` later reads from `kb`. Propagated through plain
+    # aliases exactly like the store tables.
+    retriever_vars = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target_node, value_node = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target_node, value_node = node.target, node.value
+        else:
+            continue
+        value_node = value_node.value if isinstance(value_node, ast.Await) else value_node
+        if (isinstance(value_node, ast.Call) and isinstance(value_node.func, ast.Attribute)
+                and value_node.func.attr in _RETRIEVER_METHODS):
+            target = _resolve_identity(target_node)
+            if target:
+                retriever_vars[target] = True
+    _resolve_variable_aliases(tree, retriever_vars)
+
+    def _is_retriever_chain(func_node):
+        """`kb.as_retriever().invoke(` -- the receiver is a retriever call."""
+        recv = func_node.value
+        recv = recv.value if isinstance(recv, ast.Await) else recv
+        return (isinstance(recv, ast.Call) and isinstance(recv.func, ast.Attribute)
+                and recv.func.attr in _RETRIEVER_METHODS)
 
     # read_sites: same confirmed-framework-only filter as write_sites.
     read_sites = []
@@ -2933,20 +3225,25 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
         for node, func_ctx in _walk_with_function_context(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
-            method_text = f".{node.func.attr}("
-            if _match_constructor_text(method_text, rag_reads_category, require_confirmation=False) is None:
-                continue
+            method = node.func.attr
+            method_text = f".{method}("
             receiver = _resolve_store_receiver(node.func)
+            is_read_pattern = _match_constructor_text(method_text, rag_reads_category,
+                                                      require_confirmation=False) is not None
+            is_retriever_read = method in _RETRIEVER_INVOKE_METHODS and (
+                receiver in retriever_vars or _is_retriever_chain(node.func))
+            if not (is_read_pattern or is_retriever_read):
+                continue
             framework, store_ref = _store_at(receiver, node.lineno, store_framework_by_var,
                                              store_ref_by_var, store_history)
             # `.as_retriever(` is both a handle accessor and a read pattern
             # (wiring a retriever IS the read); `collections.get(` is not.
-            if framework is None or (_is_store_handle_accessor(node.func)
-                                     and node.func.attr not in _STORE_HANDLE_METHODS):
+            if framework is None or (is_read_pattern and _is_store_handle_accessor(node.func)
+                                     and method not in _STORE_HANDLE_METHODS):
                 continue
             read_sites.append({
-                "line": node.lineno, "variable": receiver, "method": node.func.attr,
-                "framework": framework, "store": store_ref,
+                "line": node.lineno, "variable": receiver, "method": method,
+                "framework": framework, "store": store_ref, "params": _py_call_params(node),
             })
 
     # call_sites: same confirmed-framework-only filter, resolved against
@@ -2993,7 +3290,7 @@ def _reduce_python(source, agent_creation_category, rag_creation_category, rag_w
             llm_tool_calls, tool_use_markers, agent_markers, confirmed_tool_definitions,
             framework_uses,
             {var: (fw, store_ref_by_var.get(var)) for var, fw in store_framework_by_var.items()},
-            dict(agent_framework_by_var))
+            dict(agent_framework_by_var), tool_interactions)
 
 
 def _reduce_javascript(source):
@@ -3257,6 +3554,91 @@ def _js_is_graph_compile(callee, graph_vars):
     return False
 
 
+def _js_package_name(module):
+    """`@langchain/community/vectorstores/chroma` -> `@langchain/community`,
+    `chromadb/dist` -> `chromadb`; relative paths stay as they are."""
+    if not module or module.startswith("."):
+        return module
+    parts = module.removeprefix("node:").split("/")
+    return "/".join(parts[:2]) if parts[0].startswith("@") else parts[0]
+
+
+def _js_import_source(callee, aliases, shadows):
+    """-> (package, module) for the import a callee traces back to."""
+    ident = _js_root_identifier(callee)
+    binding = js_ast.visible_binding(ident, aliases, shadows) if ident is not None else None
+    if binding is None or not binding.module:
+        return None, None
+    return _js_package_name(binding.module), binding.module
+
+
+def _js_integration_store(callee, aliases, shadows):
+    """JS counterpart of _py_integration_store: `new MemoryVectorStore(..)`,
+    `Chroma.fromDocuments(..)` from @langchain/community/vectorstores/chroma."""
+    callee = js_ast.unwrap(callee)
+    method = None
+    if callee is not None and callee.type == "member_expression":
+        method = js_ast.text(callee.child_by_field_name("property"))
+        callee = js_ast.unwrap(callee.child_by_field_name("object"))
+    if callee is None or callee.type != "identifier":
+        return None
+    binding = js_ast.visible_binding(callee, aliases, shadows)
+    if binding is None or not binding.module:
+        return None
+    class_name = binding.export if binding.export not in (None, "default") else js_ast.text(callee)
+    return _integration_store(binding.module, class_name, method, js_ast.package_framework(binding.module))
+
+
+def _js_call_params(call_node):
+    """The call's arguments as source text, one entry each (see
+    _PARAM_MAX_CHARS)."""
+    args = call_node.child_by_field_name("arguments")
+    if args is None:
+        return []
+    return [_clip_param(js_ast.text(a)) for a in args.named_children if a.type != "comment"]
+
+
+# Tool factories per framework, by the export they are imported as. The
+# shared pattern table leaves bare `tool(` out on purpose (too generic);
+# here every entry is confirmed by the import the callee comes from, so
+# `tool({...})` from "ai" is a Vercel AI SDK tool and a local `tool()`
+# helper is nothing.
+_JS_TOOL_FACTORIES = {
+    "Vercel AI SDK": {"tool", "dynamicTool"},
+    "LangChain": {"tool", "DynamicStructuredTool", "DynamicTool", "StructuredTool"},
+    "Mastra": {"createTool"},
+    "OpenAI Agents SDK": {"tool"},
+    "CopilotKit": {"useCopilotAction", "useFrontendTool"},
+    "Google ADK": {"FunctionTool"},
+    "LlamaIndex": {"tool", "FunctionTool"},
+    "Claude Agent SDK": {"tool"},
+}
+
+
+def _js_tool_name(call_node):
+    """A JS tool's name: a `name`/`id` option in any object argument (LangChain
+    puts it second: `tool(fn, { name })`), else the variable it is assigned
+    to, else its key in a `tools: { weather: tool({...}) }` object."""
+    args = call_node.child_by_field_name("arguments")
+    for arg in (args.named_children if args is not None else []):
+        arg = js_ast.unwrap(arg)
+        if arg is not None and arg.type == "object":
+            for kwarg in ("name", "id"):
+                value = js_ast.string_value(_js_object_property(arg, kwarg))
+                if value:
+                    return value
+    target = _js_assign_target(call_node)
+    if target:
+        return target
+    parent = call_node.parent
+    while parent is not None and parent.type in js_ast._TRANSPARENT:
+        parent = parent.parent
+    if parent is not None and parent.type == "pair":
+        k = parent.child_by_field_name("key")
+        return js_ast.string_value(k) if k.type == "string" else js_ast.text(k)
+    return None
+
+
 def _js_local_module_paths(filename, module):
     """Repo paths a relative import specifier can resolve to, in the order
     _js_tools tries them."""
@@ -3312,10 +3694,14 @@ def _js_write_taint(call_node, assigns_by_func_and_name):
 
 def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creation_category,
                            framework_languages, javascript_sources=None, rag_writes_category=None,
-                           rag_reads_category=None, agent_calls_category=None, external_exports=None):
+                           rag_reads_category=None, agent_calls_category=None, external_exports=None,
+                           token_tool_definitions=()):
     """-> (parse_error, named_agents, named_stores, imports, store_agent_links,
     write_sites, read_sites, call_sites, framework_uses, store_vars,
-    agent_vars), each in the same shape _reduce_python emits."""
+    agent_vars, confirmed_tool_definitions, tool_interactions), each in the
+    same shape _reduce_python emits. token_tool_definitions are the
+    token-based MCP/WebMCP/registry definitions; they are merged with the
+    AST-detected tool factories and given the same evidence fields."""
     root, parse_error = js_ast.parse(source, filename)
     aliases = js_ast.build_import_aliases(root)
     shadows = js_ast.build_shadows(root, aliases)
@@ -3401,6 +3787,8 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
             pending_agents[js_ast.key(node)] = {
                 "node": node, "callee": callee, "framework": agent_framework,
                 "line": js_ast.line(node), "col": node.start_point[1] + 1, "matched_call": call_text,
+                "params": _js_call_params(node),
+                **dict(zip(("package", "module"), _js_import_source(callee, aliases, shadows))),
             }
             continue  # a call site is either an agent or a store, not both
 
@@ -3411,10 +3799,17 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
         if (store_framework is not None and store_framework not in store_frameworks
                 and store_framework != "Zep JS" and framework not in store_frameworks):
             store_framework = None
+        backend = store_framework
+        if store_framework is None or store_framework not in store_frameworks:
+            integration = _js_integration_store(callee, aliases, shadows)
+            if integration is not None:
+                store_framework, backend = integration
         if store_framework is not None:
             pending_stores[js_ast.key(node)] = {
-                "node": node, "callee": callee, "framework": store_framework,
+                "node": node, "callee": callee, "framework": store_framework, "backend": backend,
                 "line": js_ast.line(node), "col": node.start_point[1] + 1, "matched_call": call_text,
+                "params": _js_call_params(node),
+                **dict(zip(("package", "module"), _js_import_source(callee, aliases, shadows))),
             }
 
     file_tokens = None
@@ -3469,11 +3864,51 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
         "name": _js_name_option(e["node"]) or var_name, "framework": e["framework"],
         "line": e["line"], "tools_bound": tools_bound(e["node"]),
         "matched_call": e["matched_call"], "variable": var_name,
+        "package": e["package"], "module": e["module"], "params": e["params"],
     } for var_name, e in kept_agents]
     named_stores = [{
         "variable": var_name, "framework": e["framework"], "line": e["line"],
-        "col": e["col"], "matched_call": e["matched_call"],
+        "col": e["col"], "matched_call": e["matched_call"], "backend": e["backend"],
+        "package": e["package"], "module": e["module"], "params": e["params"],
     } for var_name, e in kept_stores]
+
+    # Tool definitions: import-confirmed tool factories (_JS_TOOL_FACTORIES),
+    # merged with the token-based MCP/WebMCP/registry definitions.
+    creation_keys = set(pending_agents) | set(pending_stores)
+    confirmed_tool_definitions = []
+    tool_source_by_var = {}
+    for node, callee, callee_text, is_new in calls:
+        if js_ast.key(node) in creation_keys:
+            continue
+        framework, export = _js_callee_binding(callee, aliases, shadows)
+        if framework is None or export not in _JS_TOOL_FACTORIES.get(framework, ()):
+            continue
+        package, module = _js_import_source(callee, aliases, shadows)
+        confirmed_tool_definitions.append({
+            "name": _js_tool_name(node), "framework": framework, "line": js_ast.line(node),
+            "matched_call": f"{'new ' if is_new else ''}{export}(",
+            "package": package, "module": module, "params": _js_call_params(node),
+        })
+        target = _js_assign_target(node)
+        if target:
+            tool_source_by_var[target] = (framework, package, module)
+    mcp_module = next((b.module for b in aliases.values()
+                       if (b.module or "").startswith("@modelcontextprotocol/")), None)
+    calls_by_line = {}
+    for node, callee, callee_text, is_new in calls:
+        calls_by_line.setdefault(js_ast.line(node), []).append((node, callee_text))
+    seen_definitions = {(d["line"], d["name"]) for d in confirmed_tool_definitions}
+    for d in token_tool_definitions:
+        if (d["line"], d["name"]) in seen_definitions:
+            continue
+        method = (d.get("matched_call") or "").removesuffix("(")
+        call = next((n for n, text in calls_by_line.get(d["line"], ()) if text.endswith(method)), None)
+        module = mcp_module if d.get("framework") == "MCP SDK" else None
+        confirmed_tool_definitions.append({
+            **d, "package": _js_package_name(module), "module": module,
+            "params": _js_call_params(call) if call is not None else [],
+        })
+    confirmed_tool_definitions.sort(key=lambda d: d["line"])
 
     # Cross-file: a store/agent created in another module and imported here
     # by name through a relative import. Same evidence rule as Python -- a
@@ -3533,13 +3968,23 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
             continue
         assigns_by_func_and_name[(_js_enclosing_function(node), target)] = value
         bindings.append((target, value))
+    # Variables holding a retriever / query engine (`const r = kb.asRetriever()`),
+    # so `r.invoke(q)` later reads from `kb`.
+    retriever_vars = {}
+    for target, value in bindings:
+        if (value.type == "call_expression"
+                and (fn := value.child_by_field_name("function")) is not None
+                and js_ast.unwrap(fn).type == "member_expression"
+                and js_ast.text(js_ast.unwrap(fn).child_by_field_name("property")) in _RETRIEVER_METHODS):
+            retriever_vars[target] = True
     changed = True
     while changed:
         changed = False
         for target, value in bindings:
             if value.type in ("identifier", "member_expression"):
                 source_var, tables = _js_identity(value), (
-                    store_framework_by_var, store_ref_by_var, agent_framework_by_var)
+                    store_framework_by_var, store_ref_by_var, agent_framework_by_var,
+                    tool_source_by_var, retriever_vars)
                 # only a whole `x` / `this.x`, not a property read off one
                 if source_var is None or js_ast.text(value) != source_var:
                     continue
@@ -3577,8 +4022,7 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
     # the call is made on -- which is what keeps one `kb.add(...)` from
     # counting for every framework that lists `.add(`.
     source_lines = source.splitlines()
-    creation_keys = set(pending_agents) | set(pending_stores)
-    write_sites, read_sites, call_sites = [], [], []
+    write_sites, read_sites, call_sites, tool_interactions = [], [], [], []
     for node, callee, callee_text, is_new in calls:
         callee = js_ast.unwrap(callee)
         if is_new or callee is None or callee.type != "member_expression" or js_ast.key(node) in creation_keys:
@@ -3598,18 +4042,42 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
                 source_lines, js_ast.line(node), keywords=_JS_SANITIZER_KEYWORDS) if tainted else False
             write_sites.append({
                 "line": js_ast.line(node), "variable": receiver, "method": method,
-                "framework": store_framework, "store": store_ref,
+                "framework": store_framework, "store": store_ref, "params": _js_call_params(node),
                 "tainted": tainted, "taint_source": taint_source,
                 "sanitizer_nearby": sanitized_nearby,
                 "unsanitized": tainted and not sanitized_nearby,
             })
-        if store_framework is not None and (not is_handle or method in _STORE_HANDLE_METHODS) and _match_constructor_text(
-                method_text, rag_reads_category, require_confirmation=False) is not None:
+        obj = js_ast.unwrap(callee.child_by_field_name("object"))
+        is_retriever_chain = (obj is not None and obj.type == "call_expression"
+                              and (f := obj.child_by_field_name("function")) is not None
+                              and js_ast.unwrap(f).type == "member_expression"
+                              and js_ast.text(js_ast.unwrap(f).child_by_field_name("property")) in _RETRIEVER_METHODS)
+        is_retriever_read = method in _RETRIEVER_INVOKE_METHODS and (receiver in retriever_vars or is_retriever_chain)
+        is_read_pattern = _match_constructor_text(method_text, rag_reads_category, require_confirmation=False) is not None
+        if store_framework is not None and ((is_read_pattern and (not is_handle or method in _STORE_HANDLE_METHODS))
+                                            or is_retriever_read):
             read_sites.append({
                 "line": js_ast.line(node), "variable": receiver, "method": method,
-                "framework": store_framework, "store": store_ref,
+                "framework": store_framework, "store": store_ref, "params": _js_call_params(node),
             })
         agent_receiver = _js_identity(callee)
+        if method in _TOOL_INVOKE_METHODS and agent_receiver in tool_source_by_var and imported_here(callee):
+            kind, (framework, package, module) = "invoke", tool_source_by_var[agent_receiver]
+            tool = agent_receiver
+        elif method in _MCP_CALL_TOOL_METHODS and mcp_module is not None:
+            kind, framework, package, module = "mcp_call", "MCP SDK", _js_package_name(mcp_module), mcp_module
+            args = node.child_by_field_name("arguments")
+            first = js_ast.unwrap(args.named_children[0]) if args is not None and args.named_children else None
+            tool = js_ast.string_value(first if first is None or first.type != "object"
+                                       else _js_object_property(first, "name"))
+        else:
+            kind = None
+        if kind is not None:
+            tool_interactions.append({
+                "kind": kind, "line": js_ast.line(node), "variable": agent_receiver, "method": method,
+                "framework": framework, "package": package, "module": module,
+                "matched_call": f".{method}(", "params": _js_call_params(node), "tool": tool,
+            })
         agent_framework = agent_framework_by_var.get(agent_receiver)
         if agent_framework is not None and imported_here(callee) and _match_constructor_text(
                 method_text, agent_calls_category, require_confirmation=False) is not None:
@@ -3630,7 +4098,7 @@ def _reduce_javascript_ast(source, filename, agent_creation_category, rag_creati
     return (parse_error, named_agents, named_stores, imports, store_agent_links,
             write_sites, read_sites, call_sites, framework_uses,
             {var: (fw, store_ref_by_var.get(var)) for var, fw in store_framework_by_var.items()},
-            agent_framework_by_var)
+            agent_framework_by_var, confirmed_tool_definitions, tool_interactions)
 
 
 def apply_framework_confirmation(categories):

@@ -90,10 +90,19 @@ Important `radar_summary` fields include agent counts and evidence, tool counts 
 
 Stores are reported per instance:
 
-- `n_stores` and `store_evidence`: one entry per store creation, identified as `file:line:column`, with its framework, `n_writes`, `n_reads`, the agents it is linked to, and a `role` (`read_write`, `write_only`, `read_only`, `unused`). A store that is written but never read is a log or sink rather than retrieval memory.
-- `store_frameworks`, `rag_write_frameworks`, `rag_read_frameworks`: the frameworks of the stores created, written, and read.
+- `n_stores` and `store_evidence`: one entry per store creation, identified as `file:line:column`, with its framework, `backend`, `n_writes`, `n_reads`, the agents it is linked to, and a `role` (`read_write`, `write_only`, `read_only`, `unused`). A store that is written but never read is a log or sink rather than retrieval memory.
+- `framework` is the framework whose API creates the store and `backend` the store itself: `chromadb.PersistentClient(...)` is Chroma/Chroma, `Chroma(...)` or `FAISS.from_documents(...)` imported from `langchain_community.vectorstores` is LangChain/Chroma or LangChain/FAISS. Integration stores like the latter are recognised by the module they are imported from (`vectorstores`, `vector_stores`, `langchain_chroma`, `@langchain/pinecone`, ...).
+- `store_frameworks`, `store_backends`, `rag_write_frameworks`, `rag_read_frameworks`: the frameworks and backends of the stores created, written, and read.
 - `n_stores_written`, `n_stores_read`: how many distinct stores are written and read.
+- `n_rag_writes`, `n_rag_reads`, `n_rag_interactions` and `rag_interaction_evidence`: every write and read on a known store.
 - `write` and `read` findings carry a `store` field naming the instance they target.
+
+Tools are reported as definitions and interactions:
+
+- `n_tool_definitions` and `tool_definition_sites`: every confirmed tool definition (decorators such as `@tool` / `@function_tool`, `BaseTool` subclasses, `FunctionTool(...)`, MCP `@mcp.tool` / `server.tool(...)`, and in JS/TS the import-confirmed factories `tool(...)` from `ai`, `@openai/agents` or `@langchain/core/tools`, Mastra `createTool(...)`, CopilotKit `useCopilotAction(...)`). `n_tools` still counts distinct tool names.
+- `n_tool_interactions` and `tool_interaction_evidence`, split into `n_tool_bindings` (tools handed to an agent, `bind_agent`, or to a model with `.bind_tools(...)` / `create(tools=...)`, `bind_model`), `n_tool_invocations` (a confirmed tool called directly, `search.invoke(...)`) and `n_mcp_tool_calls` (`session.call_tool(...)` / `client.callTool(...)` in a file importing an MCP SDK).
+
+Every store, write, read, tool definition and tool interaction keeps the same evidence: `file`, `line`, `line_content` (the line of code), `package` (the top-level import, e.g. `chromadb`, `@langchain/community`) and `module` (the full import path), `framework`, `matched` (the pattern detected) and `params` (the call's arguments as source text, one per entry; for a decorated tool function, its parameters).
 
 Each record also has `framework_usage`, a stricter version of the crawler's dependency filter:
 
@@ -111,7 +120,9 @@ Files ending in `.meta.json` contain provenance and progress information such as
 Contains summaries created by `aggregate.py`:
 
 - `app_corpus_totals*.json`: corpus-wide totals for scanned/failed repositories, agents, tools, skills, stores, RAG repositories, and related counts, plus `distributions` (for each count, how many repositories have each value), ready for histograms.
-- `out*.csv`: one row per counted repository with `repo_name`, `repo_url`, `stars`, `n_agents`, `n_custom_agents`, `n_tools`, `n_skills`, `n_tool_definition_markers`, `has_rag`, `n_stores`, and `passes_instantiation_filter`. This is the file to build per-repository charts from.
+- `out*.csv`: one row per counted repository with `repo_name`, `repo_url`, `stars`, `n_agents`, `n_custom_agents`, `n_tools`, `n_skills`, `n_tool_definition_markers`, `has_rag`, `n_stores`, the RAG and tool interaction counts (`n_rag_writes`, `n_rag_reads`, `n_rag_interactions`, `n_tool_definitions`, `n_tool_interactions`, `n_tool_bindings`, `n_tool_invocations`, `n_mcp_tool_calls`), and `passes_instantiation_filter`. This is the file to build per-repository charts from.
+- `elements*.csv`: one row per identified RAG/tool element (`rag_store`, `rag_write`, `rag_read`, `tool_definition`, `tool_bind_agent`, `tool_bind_model`, `tool_invoke`, `tool_mcp_call`) with its evidence: line of code, file, line, package, module, framework, backend, pattern and parameters (a JSON array).
+- `api_catalogue*.json`: for each element type and framework, the APIs (patterns) used, with the number of occurrences and of repositories.
 
 ## Typical workflow
 

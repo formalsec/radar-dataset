@@ -19,7 +19,7 @@ class). This file was previously empty; built now because `named_stores` detecti
 
 | Framework | Detection Patterns |
 |-----------|-------------------|
-| **Chroma** | `Chroma(`<br>`chromadb.Client(`<br>`chromadb.PersistentClient(`<br>`Chroma.from_documents(`<br>`Chroma.from_texts(` |
+| **Chroma** | `Chroma(`<br>`chromadb.Client(`<br>`chromadb.PersistentClient(`<br>`chromadb.HttpClient(`<br>`chromadb.AsyncHttpClient(`<br>`chromadb.CloudClient(`<br>`chromadb.EphemeralClient(`<br>`Chroma.from_documents(`<br>`Chroma.from_texts(` |
 | **Pinecone** | `Pinecone(`<br>`pinecone.Index(`<br>`Pinecone.from_existing_index(`<br>`Pinecone.from_documents(`<br>`Pinecone.from_texts(` |
 | **Qdrant** | `QdrantClient(`<br>`Qdrant.from_documents(`<br>`Qdrant.from_texts(` |
 | **Weaviate** | `weaviate.Client(`<br>`weaviate.connect_to_local(`<br>`weaviate.connect_to_weaviate_cloud(`<br>`Weaviate.from_documents(`<br>`Weaviate.from_texts(` |
