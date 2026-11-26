@@ -406,7 +406,11 @@
           "Chroma(",
           "Chroma.from_documents(",
           "Chroma.from_texts(",
+          "chromadb.AsyncHttpClient(",
           "chromadb.Client(",
+          "chromadb.CloudClient(",
+          "chromadb.EphemeralClient(",
+          "chromadb.HttpClient(",
           "chromadb.PersistentClient(",
           "new ChromaClient("
         ],

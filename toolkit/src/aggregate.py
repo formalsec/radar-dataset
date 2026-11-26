@@ -27,7 +27,56 @@ from pathlib import Path
 from .incremental_json import repair_and_load
 from .util import utc_now_compact
 
-COUNT_FIELDS = ("n_agents", "n_custom_agents", "n_tools", "n_skills", "n_stores")
+COUNT_FIELDS = ("n_agents", "n_custom_agents", "n_tools", "n_skills", "n_stores",
+                "n_rag_interactions", "n_tool_definitions", "n_tool_interactions")
+# Per-repo counts for RAG and tools, on top of the original columns.
+RAG_TOOL_FIELDS = ("n_rag_writes", "n_rag_reads", "n_rag_interactions", "n_tool_definitions",
+                   "n_tool_interactions", "n_tool_bindings", "n_tool_invocations", "n_mcp_tool_calls")
+ELEMENT_FIELDS = ("repo_name", "element", "name", "framework", "backend", "package", "module",
+                  "pattern", "file", "line", "line_content", "params", "store")
+
+
+def iter_elements(record):
+    """One row per identified RAG/tool element of a scanned repo, with the
+    evidence kept for every count: line of code, file, package, framework,
+    pattern and parameters (a JSON array). element is one of rag_store,
+    rag_write, rag_read, tool_definition, tool_bind_agent, tool_bind_model,
+    tool_invoke, tool_mcp_call."""
+    rs = record["radar_summary"]
+
+    def row(element, e, **extra):
+        return {"repo_name": record.get("repo_name"), "element": element, "name": e.get("name"),
+                "framework": e.get("framework"), "backend": e.get("backend"),
+                "package": e.get("package"), "module": e.get("module"), "pattern": e.get("matched"),
+                "file": e.get("file"), "line": e.get("line"), "line_content": e.get("line_content"),
+                "params": json.dumps(e.get("params") or [], ensure_ascii=False),
+                "store": e.get("store"), **extra}
+
+    for s in rs.get("store_evidence", []):
+        yield row("rag_store", {**s, "name": s.get("variable"), "store": s.get("id")})
+    for e in rs.get("rag_interaction_evidence", []):
+        yield row(f"rag_{e['kind']}", e)
+    for e in rs.get("tool_definition_sites", []):
+        yield row("tool_definition", e)
+    for e in rs.get("tool_interaction_evidence", []):
+        yield row(f"tool_{e['kind']}", {**e, "name": ", ".join(e.get("tools") or []) or e.get("name")})
+
+
+def api_catalogue(records):
+    """element -> framework -> pattern -> {occurrences, repos}: which API of
+    each framework is used to create / interact with RAG stores and tools."""
+    cat, repos = {}, {}
+    for record in records:
+        for e in iter_elements(record):
+            key = (e["element"], e["framework"] or "unattributed", e["pattern"] or "?")
+            slot = cat.setdefault(key[0], {}).setdefault(key[1], {}).setdefault(key[2], {"occurrences": 0, "repos": 0})
+            slot["occurrences"] += 1
+            repos.setdefault(key, set()).add(record.get("repo_name"))
+    for (element, framework, pattern), names in repos.items():
+        cat[element][framework][pattern]["repos"] = len(names)
+    return {element: {framework: dict(sorted(patterns.items(), key=lambda kv: -kv[1]["occurrences"]))
+                      for framework, patterns in sorted(by_fw.items())}
+            for element, by_fw in sorted(cat.items())}
 
 
 def _repo_key(value):
@@ -70,6 +119,10 @@ def main():
                     help="write per-repo counts to this CSV path (default: timestamped file in toolkit/output/aggregate_results)")
     ap.add_argument("--totals-json", default=f"toolkit/output/aggregate_results/app_corpus_totals_{output_timestamp}.json",
                     help="write corpus-wide totals to this JSON path (default: timestamped file in toolkit/output/aggregate_results)")
+    ap.add_argument("--elements-csv", default=f"toolkit/output/aggregate_results/elements_{output_timestamp}.csv",
+                    help="write one row per identified RAG/tool element with its evidence (see iter_elements)")
+    ap.add_argument("--api-json", default=f"toolkit/output/aggregate_results/api_catalogue_{output_timestamp}.json",
+                    help="write, per element type and framework, the APIs (patterns) used and in how many repos")
     ap.add_argument("--top", type=int, default=20, help="how many repos to print, ranked by n_agents (default 20)")
     ap.add_argument("--repos", default=None,
                     help="only count repositories listed in this file: a URL list, a manifest, or a "
@@ -117,6 +170,7 @@ def main():
             "n_tool_definition_markers": rs.get("n_tool_definition_markers", 0),
             "has_rag": rs.get("has_rag", False),
             "n_stores": rs.get("n_stores", 0),
+            **{field: rs.get(field, 0) for field in RAG_TOOL_FIELDS},
             "passes_instantiation_filter": r.get("framework_usage", {}).get("passes_instantiation_filter"),
         })
 
@@ -163,7 +217,8 @@ def main():
                                                      "n_custom_agents", "n_tools",
                                                      "n_skills",
                                                      "n_tool_definition_markers", "has_rag",
-                                                     "n_stores", "passes_instantiation_filter"])
+                                                     "n_stores", *RAG_TOOL_FIELDS,
+                                                     "passes_instantiation_filter"])
             writer.writeheader()
             writer.writerows(rows)
         print(f"\nWrote per-repo CSV to {args.csv}")
@@ -184,6 +239,10 @@ def main():
             "repos_with_at_least_1_skill": n_repos_with_skills,
             "repos_with_rag": n_repos_with_rag,
             "total_n_stores": sum(x["n_stores"] for x in rows),
+            **{f"total_{field}": sum(x[field] for x in rows) for field in RAG_TOOL_FIELDS},
+            "repos_with_rag_interactions": sum(1 for x in rows if x["n_rag_interactions"]),
+            "repos_with_tool_definitions": sum(1 for x in rows if x["n_tool_definitions"]),
+            "repos_with_tool_interactions": sum(1 for x in rows if x["n_tool_interactions"]),
             # value -> number of repos with that value, for histograms
             "distributions": {
                 field: {str(value): n for value, n in sorted(Counter(x[field] for x in rows).items())}
@@ -193,6 +252,22 @@ def main():
         with open(args.totals_json, "w", encoding="utf-8") as f:
             json.dump(totals, f, indent=2)
         print(f"Wrote corpus totals to {args.totals_json}")
+
+    if args.elements_csv:
+        n = 0
+        with open(args.elements_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=ELEMENT_FIELDS)
+            writer.writeheader()
+            for r in scanned:
+                for e in iter_elements(r):
+                    writer.writerow(e)
+                    n += 1
+        print(f"Wrote {n} RAG/tool elements to {args.elements_csv}")
+
+    if args.api_json:
+        with open(args.api_json, "w", encoding="utf-8") as f:
+            json.dump(api_catalogue(scanned), f, indent=2, ensure_ascii=False)
+        print(f"Wrote the API catalogue to {args.api_json}")
 
 
 if __name__ == "__main__":

@@ -77,6 +77,21 @@ from browser_use import Controller
 
 ## Confirmed JS/TS Detection
 
+Tool factories confirmed by the import the callee comes from (implemented as
+`_JS_TOOL_FACTORIES` in `pattern_detector.py`, not as table rows, because a
+bare `tool(` is only safe to count once its import is known):
+
+- Vercel AI SDK: `tool(`, `dynamicTool(` from `ai`
+- LangChain.js: `tool(`, `new DynamicStructuredTool(`, `new DynamicTool(` from `@langchain/core/tools`
+- Mastra: `createTool(` from `@mastra/core`
+- OpenAI Agents SDK (JS): `tool(` from `@openai/agents`
+- CopilotKit: `useCopilotAction(`, `useFrontendTool(`
+- Google ADK (JS): `new FunctionTool(` from `@google/adk`
+- LlamaIndex.TS: `tool(` from `llamaindex`
+- Claude Agent SDK: `tool(` from `@anthropic-ai/claude-agent-sdk`
+
+The three shapes below are detected in addition:
+
 Three shapes, implemented in `pattern_detector.py`, are confirmed the same way
 Python's decorators/constructors are (they feed `n_tools`, not just the
 unconfirmed marker tier). All three require an actual usage context, not object
